@@ -6,6 +6,7 @@ using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
+using MediaBrowser.Model.MediaInfo;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -127,7 +128,12 @@ namespace StrmAssistant.Common
             return new List<MediaSourceInfo>();
         }
 
-        public static Task<IMediaMount> Mount(this IMediaMountManager mediaMountManager,
+        /// <summary>
+        /// Emby 4.9 changed IMediaMountManager.Mount from a ReadOnlyMemory-based API and also
+        /// changed the returned mount object's path property from MountedPath to
+        /// MountedPathInfo.FullName. The adapter preserves the old call site used by this fork.
+        /// </summary>
+        public static async Task<LegacyMediaMount> Mount(this IMediaMountManager mediaMountManager,
             ReadOnlyMemory<char> mediaPath, string container, CancellationToken cancellationToken)
         {
             var method = mediaMountManager.GetType()
@@ -161,15 +167,65 @@ namespace StrmAssistant.Common
                     : container.AsMemory();
             }
 
-            var result = method.Invoke(mediaMountManager,
+            var pending = method.Invoke(mediaMountManager,
                 new[] { (object)mediaPath.ToString(), containerArgument, cancellationToken });
 
-            if (result is Task<IMediaMount> task)
+            if (!(pending is Task task))
             {
-                return task;
+                throw new InvalidOperationException(
+                    $"Unsupported Mount return type: {pending?.GetType().FullName ?? "null"}");
             }
 
-            throw new InvalidOperationException($"Unsupported Mount return type: {result?.GetType().FullName ?? "null"}");
+            await task.ConfigureAwait(false);
+
+            var resultProperty = task.GetType().GetProperty("Result", BindingFlags.Instance | BindingFlags.Public);
+            var mount = resultProperty?.GetValue(task);
+            return new LegacyMediaMount(mount);
+        }
+    }
+
+    internal sealed class LegacyMediaMount : IDisposable
+    {
+        private readonly object _innerMount;
+
+        public LegacyMediaMount(object innerMount)
+        {
+            _innerMount = innerMount;
+            MountedPath = ResolveMountedPath(innerMount);
+        }
+
+        public string MountedPath { get; }
+
+        private static string ResolveMountedPath(object mount)
+        {
+            if (mount == null)
+            {
+                return null;
+            }
+
+            var mountType = mount.GetType();
+
+            // Emby 4.8-style implementations.
+            var legacyPath = mountType.GetProperty("MountedPath", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(mount) as string;
+            if (!string.IsNullOrEmpty(legacyPath))
+            {
+                return legacyPath;
+            }
+
+            // Emby 4.9+ uses MountedPathInfo.FullName.
+            var pathInfo = mountType.GetProperty("MountedPathInfo", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(mount);
+            return pathInfo?.GetType().GetProperty("FullName", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(pathInfo) as string;
+        }
+
+        public void Dispose()
+        {
+            if (_innerMount is IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
         }
     }
 }
