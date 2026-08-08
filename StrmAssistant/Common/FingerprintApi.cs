@@ -11,6 +11,7 @@ using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Serialization;
+using StrmAssistant.MediaEnhance;
 using StrmAssistant.Options;
 using StrmAssistant.Properties;
 using System;
@@ -102,6 +103,13 @@ namespace StrmAssistant.Common
         public Task<Tuple<string, bool>> CreateTitleFingerprint(Episode item, IDirectoryService directoryService,
             CancellationToken cancellationToken)
         {
+            if (MediaExtractionFilter.ShouldSkip(item, out var reason))
+            {
+                _logger.Info("IntroFingerprintExtract - Skipped by extraction blacklist: {0} ({1})", item.Path,
+                    reason);
+                return Task.FromResult(Tuple.Create(string.Empty, false));
+            }
+
             var libraryOptions = _libraryManager.GetLibraryOptions(item);
 
             return (Task<Tuple<string, bool>>)_createTitleFingerprint.Invoke(_audioFingerprintManager,
@@ -175,7 +183,8 @@ namespace StrmAssistant.Common
 
             var expanded = Plugin.LibraryApi.ExpandFavorites(favorites, false, null, false).OfType<Episode>();
 
-            var result = expanded.GroupBy(e => e.ParentId).Select(g => g.Key).ToArray();
+            var result = MediaExtractionFilter.Apply(expanded)
+                .GroupBy(e => e.ParentId).Select(g => g.Key).ToArray();
 
             return result;
         }
@@ -188,13 +197,14 @@ namespace StrmAssistant.Common
             var includeFavorites = libraryIds?.Contains("-1") == true;
 
             var resultItems = new List<Episode>();
-            var incomingItems = items.OfType<Episode>().ToList();
+            var incomingItems = MediaExtractionFilter.Apply(items.OfType<Episode>()).ToList();
 
             if (IsCatchupTaskSelected(GeneralOptions.CatchupTask.Fingerprint) && LibraryPathsInScope.Any())
             {
                 if (includeFavorites)
                 {
-                    resultItems = Plugin.LibraryApi.ExpandFavorites(items, true, null, false).OfType<Episode>()
+                    resultItems = MediaExtractionFilter.Apply(
+                            Plugin.LibraryApi.ExpandFavorites(items, true, null, false).OfType<Episode>())
                         .ToList();
                 }
 
@@ -208,7 +218,8 @@ namespace StrmAssistant.Common
             }
 
             var isModSupported = Plugin.Instance.IsModSupported;
-            resultItems = resultItems.Where(i => isModSupported || !i.IsShortcut).GroupBy(i => i.InternalId)
+            resultItems = MediaExtractionFilter.Apply(resultItems)
+                .Where(i => isModSupported || !i.IsShortcut).GroupBy(i => i.InternalId)
                 .Select(g => g.First()).ToList();
 
             var unprocessedItems = FilterUnprocessed(resultItems);
@@ -224,6 +235,13 @@ namespace StrmAssistant.Common
 
             foreach (var item in items)
             {
+                if (MediaExtractionFilter.ShouldSkip(item, out var reason))
+                {
+                    _logger.Info("IntroFingerprintExtract - Skipped by extraction blacklist: {0} ({1})", item.Path,
+                        reason);
+                    continue;
+                }
+
                 if (Plugin.LibraryApi.IsExtractNeeded(item, enableImageCapture))
                 {
                     results.Add(item);
@@ -241,6 +259,8 @@ namespace StrmAssistant.Common
 
         public bool IsExtractNeeded(BaseItem item)
         {
+            if (MediaExtractionFilter.ShouldSkip(item, out _)) return false;
+
             return !Plugin.ChapterApi.HasIntro(item) &&
                    string.IsNullOrEmpty(_itemRepository.GetIntroDetectionFailureResult(item.InternalId));
         }
@@ -274,7 +294,7 @@ namespace StrmAssistant.Common
             var items = _libraryManager.GetItemList(itemsFingerprintQuery).Where(i => isModSupported || !i.IsShortcut)
                 .OfType<Episode>().ToList();
 
-            return items;
+            return MediaExtractionFilter.Apply(items).ToList();
         }
 
         public List<Episode> FetchIntroFingerprintTaskItems()
@@ -326,7 +346,7 @@ namespace StrmAssistant.Common
             var items = _libraryManager.GetItemList(itemsFingerprintQuery).Where(i => isModSupported || !i.IsShortcut)
                 .OfType<Episode>().ToList();
 
-            return items;
+            return MediaExtractionFilter.Apply(items).ToList();
         }
 
         public void UpdateLibraryIntroDetectionFingerprintLength()
@@ -334,7 +354,7 @@ namespace StrmAssistant.Common
             var libraries = _libraryManager.GetVirtualFolders()
                 .Where(f => f.CollectionType == CollectionType.TvShows.ToString() || f.CollectionType is null)
                 .ToList();
-            
+
             var currentLength = Plugin.Instance.GetPluginOptions().IntroSkipOptions.IntroDetectionFingerprintMinutes;
 
             foreach (var library in libraries)
@@ -368,10 +388,13 @@ namespace StrmAssistant.Common
                 HasIntroDetectionFailure = false,
                 HasAudioStream = true
             };
-            var allEpisodes = season.GetEpisodes(episodeQuery).Items.OfType<Episode>().ToArray();
+            var allEpisodes = MediaExtractionFilter.Apply(season.GetEpisodes(episodeQuery).Items.OfType<Episode>())
+                .ToArray();
 
             episodeQuery.WithoutChapterMarkers = new[] { MarkerType.IntroStart };
-            var episodesWithoutMarkers = season.GetEpisodes(episodeQuery).Items.OfType<Episode>().ToList();
+            var episodesWithoutMarkers = MediaExtractionFilter.Apply(
+                    season.GetEpisodes(episodeQuery).Items.OfType<Episode>())
+                .ToList();
 
             var seasonFingerprintInfo = await GetAllFingerprintFilesForSeason(season,
                 allEpisodes, libraryOptions, directoryService, cancellationToken).ConfigureAwait(false);
@@ -385,7 +408,7 @@ namespace StrmAssistant.Common
                 UpdateSequencesForSeason(season, seasonFingerprintInfo, episode, libraryOptions, directoryService);
 
                 index++;
-                progress?.Report(index / total);
+                progress?.Report(total == 0 ? 1.0 : index / total);
             }
 
             progress?.Report(1.0);
