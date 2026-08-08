@@ -6,6 +6,7 @@ using MediaBrowser.Controller.Notifications;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Session;
+using StrmAssistant.Experience;
 using StrmAssistant.Notification;
 using StrmAssistant.Options;
 using StrmAssistant.Properties;
@@ -107,8 +108,7 @@ namespace StrmAssistant.Common
 
             var request = new NotificationRequest
             {
-                Title =
-                    Resources.PluginOptions_EditorTitle_Strm_Assistant,
+                Title = Resources.PluginOptions_EditorTitle_Strm_Assistant,
                 EventId = StrmAssistantNotificationTypes.IntroSkipUpdate,
                 User = _userManager.GetUserById(session.UserInternalId),
                 Item = episode,
@@ -142,8 +142,7 @@ namespace StrmAssistant.Common
 
             var request = new NotificationRequest
             {
-                Title =
-                    Resources.PluginOptions_EditorTitle_Strm_Assistant,
+                Title = Resources.PluginOptions_EditorTitle_Strm_Assistant,
                 EventId = StrmAssistantNotificationTypes.IntroSkipUpdate,
                 User = _userManager.GetUserById(session.UserInternalId),
                 Item = episode,
@@ -151,36 +150,56 @@ namespace StrmAssistant.Common
                 Description = string.Format(
                     Resources.Notification_CreditsUpdate_Description.Replace("\\n", Environment.NewLine),
                     episode.FindSeriesName(), episode.FindSeasonName(), creditsDuration, session.UserName)
-
             };
             _notificationManager.SendNotification(request);
         }
 
+        public void MetadataUpdateSendNotification(BaseItem item, IEnumerable<MetadataFieldChange> changes)
+        {
+            var changeList = (changes ?? Array.Empty<MetadataFieldChange>()).ToList();
+            if (changeList.Count == 0) return;
+
+            MetadataUpdateSendNotification(item, MetadataChangeTracker.FormatDescription(changeList));
+        }
+
         public void MetadataUpdateSendNotification(BaseItem item, string description)
         {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance || !options.NotifyMetadataUpdate) return;
+
             SendItemEventToAdmins(StrmAssistantNotificationTypes.MetadataUpdate, "媒体元数据更新", item, description);
         }
 
-        public void ImageUpdateSendNotification(BaseItem item, string description)
+        public void ImageUpdateSendNotification(BaseItem item, string imageType)
         {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance || !options.NotifyImageUpdate) return;
+
+            var description = string.IsNullOrWhiteSpace(imageType)
+                ? "Image Type: Unknown"
+                : $"Image Type: {imageType.Trim()}";
+
             SendItemEventToAdmins(StrmAssistantNotificationTypes.ImageUpdate, "媒体图片更新", item, description);
         }
 
         public void CollectionItemsAddedSendNotification(BaseItem item, string description)
         {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance || !options.NotifyCollectionItemsUpdate) return;
+
             SendItemEventToAdmins(StrmAssistantNotificationTypes.CollectionItemsAdded, "合集新增媒体", item, description);
         }
 
         public void CollectionItemsRemovedSendNotification(BaseItem item, string description)
         {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance || !options.NotifyCollectionItemsUpdate) return;
+
             SendItemEventToAdmins(StrmAssistantNotificationTypes.CollectionItemsRemoved, "合集移除媒体", item, description);
         }
 
         private void SendItemEventToAdmins(string eventId, string titleSuffix, BaseItem item, string description)
         {
-            var options = ExperienceOptions;
-            if (!options.EnableNotificationEnhance) return;
-
             var admins = LibraryApi.AllUsers.Where(kvp => kvp.Value).Select(kvp => kvp.Key).ToList();
             foreach (var admin in admins)
             {
