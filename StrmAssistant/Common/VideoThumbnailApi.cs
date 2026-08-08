@@ -8,6 +8,7 @@ using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Logging;
+using StrmAssistant.MediaEnhance;
 using StrmAssistant.Properties;
 using System;
 using System.Collections.Generic;
@@ -77,6 +78,12 @@ namespace StrmAssistant.Common
             IDirectoryService directoryService, List<ChapterInfo> chapters, bool extractImages, bool saveChapters,
             CancellationToken cancellationToken)
         {
+            if (MediaExtractionFilter.ShouldSkip(item, out var reason))
+            {
+                _logger.Info("VideoThumbnailExtract - Skipped by extraction blacklist: {0} ({1})", item.Path, reason);
+                return Task.FromResult(false);
+            }
+
             var mediaSource = AppVer >= Ver4936
                 ? item.GetMediaSources(false, false, libraryOptions).FirstOrDefault()
                 : null;
@@ -174,7 +181,14 @@ namespace StrmAssistant.Common
             var combined = favoritesWithExtra.Concat(items).Concat(extras).GroupBy(i => i.InternalId)
                 .Select(g => g.First()).Where(i => isModSupported || !i.IsShortcut).OfType<Video>().ToList();
 
-            return combined;
+            var filtered = MediaExtractionFilter.Apply(combined).ToList();
+            if (filtered.Count != combined.Count)
+            {
+                _logger.Info("VideoThumbnailExtract - Extraction blacklist skipped {0} item(s).",
+                    combined.Count - filtered.Count);
+            }
+
+            return filtered;
         }
     }
 }
