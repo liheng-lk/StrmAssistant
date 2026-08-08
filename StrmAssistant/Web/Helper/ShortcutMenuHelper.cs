@@ -30,7 +30,7 @@ namespace StrmAssistant.Web.Helper
         private static MemoryStream GetResourceStream(string resourceName)
         {
             var name = typeof(Plugin).Namespace + ".Web.Resources." + resourceName;
-            var manifestResourceStream = typeof (ShortcutMenuHelper).GetTypeInfo().Assembly.GetManifestResourceStream(name);
+            var manifestResourceStream = typeof(ShortcutMenuHelper).GetTypeInfo().Assembly.GetManifestResourceStream(name);
             var destination = new MemoryStream((int) manifestResourceStream.Length);
             manifestResourceStream.CopyTo(destination);
             return destination;
@@ -61,6 +61,11 @@ const strmAssistantCommandSource = {
             'zh-hk': '\u89E3\u9396',
             'zh-tw': '\u89E3\u9396'
         }[locale] || 'Unlock') + (cjk ? this.globalize.translate('Metadata') : ' ' + this.globalize.translate('Metadata'));
+        const deepDeleteCommandName = ({
+            'zh-cn': '\u6DF1\u5EA6\u5220\u9664',
+            'zh-hk': '\u6DF1\u5EA6\u522A\u9664',
+            'zh-tw': '\u6DF1\u5EA6\u522A\u9664'
+        }[locale] || 'Deep Delete');
 
         if (options.items?.length === 1 && options.items[0].LibraryOptions && options.items[0].Type === 'VirtualFolder' &&
             options.items[0].CollectionType !== 'boxsets' && options.items[0].CollectionType !== 'playlists') {
@@ -73,11 +78,14 @@ const strmAssistantCommandSource = {
         }
         if (options.items?.length === 1) {
             const result = [];
-            if (options.items[0].Type === 'Movie') {
+            const item = options.items[0];
+            const isAdmin = (options.user && options.user.Policy.IsAdministrator) || false;
+
+            if (item.Type === 'Movie') {
                 result.push({ name: this.globalize.translate('HeaderScanLibraryFiles'), id: 'traverse', icon: 'refresh' });
             }
-            if ((options.items[0].Type === 'Movie' || options.items[0].Type === 'Episode') &&
-                 options.items[0].CanDelete && options.mediaSourceId && options.items[0].MediaSources.length > 1) {
+            if ((item.Type === 'Movie' || item.Type === 'Episode') &&
+                 item.CanDelete && options.mediaSourceId && item.MediaSources.length > 1) {
                 result.push({
                     name: cjk
                         ? this.globalize.translate('Delete') + this.globalize.translate('Version')
@@ -86,17 +94,19 @@ const strmAssistantCommandSource = {
                     icon: 'remove'
                 });
             }
-            if (options.items[0].hasOwnProperty('LockData') && options.items[0].Type !== 'CollectionFolder' &&
-                (options.user && options.user.Policy.IsAdministrator || false)) {
-                if (options.items[0].LockData) {
+            if (item.CanDelete && isAdmin &&
+                ['Movie', 'Episode', 'Video', 'MusicVideo', 'Audio'].includes(item.Type)) {
+                result.push({ name: deepDeleteCommandName, id: 'deep_delete', icon: 'delete_forever' });
+            }
+            if (item.hasOwnProperty('LockData') && item.Type !== 'CollectionFolder' && isAdmin) {
+                if (item.LockData) {
                     result.push({ name: unlockCommandName, id: 'unlock', icon: 'lock_open' });
                 } else {
                     result.push({ name: lockCommandName, id: 'lock', icon: 'lock' });
                 }
             }
-            if ((options.items[0].Type === 'Series' || options.items[0].Type === 'Season') &&
-                (options.user && options.user.Policy.IsAdministrator || false)) {
-                const commandName = locale === 'zh-cn' ? '\u6E05\u9664\u7247\u5934\u6807\u8BB0' : 
+            if ((item.Type === 'Series' || item.Type === 'Season') && isAdmin) {
+                const commandName = locale === 'zh-cn' ? '\u6E05\u9664\u7247\u5934\u6807\u8BB0' :
                     (['zh-hk', 'zh-tw'].includes(locale) ? '\u6E05\u9664\u7247\u982D\u6A19\u8A18' : 'Clear Intro Markers');
                 result.push({ name: commandName, id: 'clear_intro', icon: 'clear_all' });
             }
@@ -117,6 +127,7 @@ const strmAssistantCommandSource = {
             copy: 'copy',
             remove: 'remove',
             traverse: 'traverse',
+            deep_delete: 'deepdelete',
             lock: 'lock',
             unlock: 'unlock',
             clear_intro: 'clear_intro'
