@@ -50,7 +50,7 @@ GitHub Actions run `31255226989` completed successfully after the blacklist, mus
 - [x] Emby Core 4.8.0.80 compile/package/artifact.
 - [x] Emby Core 4.9.1.90 compile/package/artifact.
 - [x] Emby Core 4.10.0.1-beta compile/package/artifact.
-- [ ] Real Emby 4.9.5 runtime: external audio resolver initialization.
+- [ ] Real Emby 4.9.x runtime: external audio resolver initialization.
 - [ ] Real movie/episode external-audio add/remove/rescan test.
 - [ ] Music JSON save/restore test with embedded artwork.
 - [ ] Blacklist tag/keyword smoke test for MediaInfo, fingerprint and BIF.
