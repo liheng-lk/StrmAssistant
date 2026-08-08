@@ -1,38 +1,49 @@
 name: Build Plugin
 
 on:
-  push:
-    branches:
-      - tab-ui
-      - simple-ui
-      - lite
   pull_request:
     branches:
-      - tab-ui
-      - simple-ui
-      - lite
+      - main
 
 jobs:
   build:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emby_core:
+          - "4.8.0.80"
+          - "4.9.1.90"
+          - "4.10.0.1-beta"
+
+    name: Emby Core ${{ matrix.emby_core }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '6.x'
+          dotnet-version: "8.0.x"
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Install ILRepack
+        shell: pwsh
+        run: dotnet tool install -g dotnet-ilrepack --version 2.0.44
 
-      - name: Build the project
-        run: dotnet build --no-restore --configuration Release
+      - name: Restore, build and package
+        shell: pwsh
+        run: |
+          dotnet msbuild StrmAssistant/StrmAssistant.csproj `
+            -restore `
+            -t:PackagePlugin `
+            -p:Configuration=Release `
+            -p:EmbyServerCoreVersion=${{ matrix.emby_core }} `
+            -p:PluginOutputDir="${{ github.workspace }}\artifacts\${{ matrix.emby_core }}"
 
-      - name: Upload artifact
+      - name: Upload plugin artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StrmAssistant
-          path: C:\Users\runneradmin\AppData\Roaming\Emby-Server\programdata\plugins\StrmAssistant${{ github.ref_name == 'lite' && 'Lite' || '' }}.dll
+          name: StrmAssistantCustom-emby-${{ matrix.emby_core }}
+          path: artifacts/${{ matrix.emby_core }}/StrmAssistantCustom.dll
+          if-no-files-found: error
