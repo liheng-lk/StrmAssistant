@@ -2,7 +2,7 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Controller.Providers;
-using StrmAssistant.MediaEnhance;
+using MediaBrowser.Model.IO;
 using StrmAssistant.Options;
 using System;
 
@@ -16,11 +16,13 @@ namespace StrmAssistant.MediaEnhance
     public sealed class MusicMediaInfoPersistMonitor : IServerEntryPoint
     {
         private readonly ILibraryManager _libraryManager;
+        private readonly IFileSystem _fileSystem;
         private bool _started;
 
-        public MusicMediaInfoPersistMonitor(ILibraryManager libraryManager)
+        public MusicMediaInfoPersistMonitor(ILibraryManager libraryManager, IFileSystem fileSystem)
         {
             _libraryManager = libraryManager;
+            _fileSystem = fileSystem;
         }
 
         public void Run()
@@ -60,7 +62,7 @@ namespace StrmAssistant.MediaEnhance
 
             try
             {
-                var directoryService = new DirectoryService(plugin.Logger, plugin.ApplicationHost.Resolve<MediaBrowser.Model.IO.IFileSystem>());
+                var directoryService = new DirectoryService(plugin.Logger, _fileSystem);
                 var hasMediaInfo = libraryApi.HasMediaInfo(audio);
 
                 if (!hasMediaInfo)
@@ -94,7 +96,7 @@ namespace StrmAssistant.MediaEnhance
 
             try
             {
-                var directoryService = new DirectoryService(plugin.Logger, plugin.ApplicationHost.Resolve<MediaBrowser.Model.IO.IFileSystem>());
+                var directoryService = new DirectoryService(plugin.Logger, _fileSystem);
                 mediaInfoApi.DeleteMediaInfoJson(audio, directoryService, "Music Item Removed Event");
             }
             catch (Exception ex)
