@@ -1,6 +1,8 @@
 using MediaBrowser.Controller.Collections;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace StrmAssistant.Notification
@@ -12,11 +14,13 @@ namespace StrmAssistant.Notification
     public sealed class CollectionNotificationMonitor : IServerEntryPoint
     {
         private readonly ICollectionManager _collectionManager;
+        private readonly ILibraryManager _libraryManager;
         private bool _started;
 
-        public CollectionNotificationMonitor(ICollectionManager collectionManager)
+        public CollectionNotificationMonitor(ICollectionManager collectionManager, ILibraryManager libraryManager)
         {
             _collectionManager = collectionManager;
+            _libraryManager = libraryManager;
         }
 
         public void Run()
@@ -37,7 +41,7 @@ namespace StrmAssistant.Notification
             _collectionManager.ItemsRemovedFromCollection -= OnItemsRemoved;
         }
 
-        private static void OnItemsAdded(object sender, CollectionModifiedEventArgs e)
+        private void OnItemsAdded(object sender, CollectionModifiedEventArgs e)
         {
             var notificationApi = Plugin.NotificationApi;
             var options = Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions;
@@ -52,7 +56,7 @@ namespace StrmAssistant.Notification
                 BuildDescription(e, "Added"));
         }
 
-        private static void OnItemsRemoved(object sender, CollectionModifiedEventArgs e)
+        private void OnItemsRemoved(object sender, CollectionModifiedEventArgs e)
         {
             var notificationApi = Plugin.NotificationApi;
             var options = Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions;
@@ -67,14 +71,20 @@ namespace StrmAssistant.Notification
                 BuildDescription(e, "Removed"));
         }
 
-        private static string BuildDescription(CollectionModifiedEventArgs e, string action)
+        private string BuildDescription(CollectionModifiedEventArgs e, string action)
         {
-            var names = e.ItemsChanged?
-                .Where(item => item != null)
-                .Select(item => string.IsNullOrWhiteSpace(item.Name)
-                    ? item.InternalId.ToString()
-                    : item.Name)
-                .ToList() ?? new System.Collections.Generic.List<string>();
+            var names = new List<string>();
+
+            if (e.ItemsChanged != null)
+            {
+                foreach (var itemId in e.ItemsChanged)
+                {
+                    var item = _libraryManager.GetItemById(itemId);
+                    names.Add(item == null || string.IsNullOrWhiteSpace(item.Name)
+                        ? itemId.ToString()
+                        : item.Name);
+                }
+            }
 
             var firstLine = $"Collection: {e.Collection.Name}";
             if (names.Count == 0) return firstLine;
