@@ -35,6 +35,7 @@ namespace StrmAssistant.Api
         public List<DeepDeleteResponseEntry> Entries { get; set; } = new List<DeepDeleteResponseEntry>();
         public List<string> Warnings { get; set; } = new List<string>();
         public List<string> DeletedPaths { get; set; } = new List<string>();
+        public List<string> DeletedDirectories { get; set; } = new List<string>();
         public List<string> SkippedPaths { get; set; } = new List<string>();
         public List<string> Errors { get; set; } = new List<string>();
     }
@@ -124,6 +125,7 @@ namespace StrmAssistant.Api
 
             var execution = _deepDeleteService.Execute(plan, options);
             response.DeletedPaths.AddRange(execution.DeletedPaths);
+            response.DeletedDirectories.AddRange(execution.DeletedDirectories);
             response.SkippedPaths.AddRange(execution.SkippedPaths);
             response.Errors.AddRange(execution.Errors);
 
@@ -153,8 +155,15 @@ namespace StrmAssistant.Api
             var actingUser = _authorizationContext.GetAuthorizationInfo(Request)?.User;
             if (actingUser != null && Plugin.NotificationApi != null)
             {
-                var paths = new HashSet<string>(response.DeletedPaths, StringComparer.OrdinalIgnoreCase);
-                Plugin.NotificationApi.DeepDeleteSendNotification(item, actingUser, paths);
+                var targetPaths = plan.Entries
+                    .Where(entry => entry.Kind == DeepDeleteEntryKind.StrmTarget &&
+                                    response.DeletedPaths.Contains(entry.Path, StringComparer.OrdinalIgnoreCase))
+                    .Select(entry => entry.Path);
+
+                Plugin.NotificationApi.DeepDeleteSendNotification(
+                    item,
+                    actingUser,
+                    new HashSet<string>(targetPaths, StringComparer.OrdinalIgnoreCase));
             }
 
             return response;
