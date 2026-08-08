@@ -6,6 +6,8 @@ using MediaBrowser.Controller.Notifications;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Session;
+using StrmAssistant.Notification;
+using StrmAssistant.Options;
 using StrmAssistant.Properties;
 using System;
 using System.Collections.Generic;
@@ -30,8 +32,14 @@ namespace StrmAssistant.Common
             _sessionManager = sessionManager;
         }
 
+        private ExperienceEnhanceOptions ExperienceOptions =>
+            Plugin.Instance.GetPluginOptions().ExperienceEnhanceOptions;
+
         public void FavoritesUpdateSendNotification(BaseItem item)
         {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance || !options.NotifyFavoritesUpdate) return;
+
             Resources.Culture = Thread.CurrentThread.CurrentUICulture;
 
             var users = Plugin.LibraryApi.GetUsersByFavorites(item);
@@ -40,7 +48,7 @@ namespace StrmAssistant.Common
                 var request = new NotificationRequest
                 {
                     Title = Resources.PluginOptions_EditorTitle_Strm_Assistant,
-                    EventId = "favorites.update",
+                    EventId = StrmAssistantNotificationTypes.FavoritesUpdate,
                     User = user,
                     Item = item,
                     Description =
@@ -54,15 +62,18 @@ namespace StrmAssistant.Common
 
         public void DeepDeleteSendNotification(BaseItem item, User user, HashSet<string> mountPaths)
         {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance || !options.NotifyDeepDelete) return;
+
             Resources.Culture = Thread.CurrentThread.CurrentUICulture;
 
-            var mountPathList = string.Join(Environment.NewLine, mountPaths);
+            var mountPathList = string.Join(Environment.NewLine, mountPaths ?? new HashSet<string>());
 
             var request = new NotificationRequest
             {
                 Title = Resources.PluginOptions_EditorTitle_Strm_Assistant + " - " +
                         Resources.Notification_DeepDelete_EventName,
-                EventId = "deep.delete",
+                EventId = StrmAssistantNotificationTypes.DeepDelete,
                 User = user,
                 Item = item,
                 Description =
@@ -77,6 +88,9 @@ namespace StrmAssistant.Common
         public async Task IntroUpdateSendNotification(Episode episode, SessionInfo session, string introStartTime,
             string introEndTime)
         {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance || !options.NotifyIntroCreditsUpdate) return;
+
             Resources.Culture = Thread.CurrentThread.CurrentUICulture;
 
             if (CanDisplayMessage(session))
@@ -95,7 +109,7 @@ namespace StrmAssistant.Common
             {
                 Title =
                     Resources.PluginOptions_EditorTitle_Strm_Assistant,
-                EventId = "introskip.update",
+                EventId = StrmAssistantNotificationTypes.IntroSkipUpdate,
                 User = _userManager.GetUserById(session.UserInternalId),
                 Item = episode,
                 Session = session,
@@ -109,6 +123,9 @@ namespace StrmAssistant.Common
 
         public async Task CreditsUpdateSendNotification(Episode episode, SessionInfo session, string creditsDuration)
         {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance || !options.NotifyIntroCreditsUpdate) return;
+
             Resources.Culture = Thread.CurrentThread.CurrentUICulture;
 
             if (CanDisplayMessage(session))
@@ -127,7 +144,7 @@ namespace StrmAssistant.Common
             {
                 Title =
                     Resources.PluginOptions_EditorTitle_Strm_Assistant,
-                EventId = "introskip.update",
+                EventId = StrmAssistantNotificationTypes.IntroSkipUpdate,
                 User = _userManager.GetUserById(session.UserInternalId),
                 Item = episode,
                 Session = session,
@@ -137,6 +154,45 @@ namespace StrmAssistant.Common
 
             };
             _notificationManager.SendNotification(request);
+        }
+
+        public void MetadataUpdateSendNotification(BaseItem item, string description)
+        {
+            SendItemEventToAdmins(StrmAssistantNotificationTypes.MetadataUpdate, "媒体元数据更新", item, description);
+        }
+
+        public void ImageUpdateSendNotification(BaseItem item, string description)
+        {
+            SendItemEventToAdmins(StrmAssistantNotificationTypes.ImageUpdate, "媒体图片更新", item, description);
+        }
+
+        public void CollectionItemsAddedSendNotification(BaseItem item, string description)
+        {
+            SendItemEventToAdmins(StrmAssistantNotificationTypes.CollectionItemsAdded, "合集新增媒体", item, description);
+        }
+
+        public void CollectionItemsRemovedSendNotification(BaseItem item, string description)
+        {
+            SendItemEventToAdmins(StrmAssistantNotificationTypes.CollectionItemsRemoved, "合集移除媒体", item, description);
+        }
+
+        private void SendItemEventToAdmins(string eventId, string titleSuffix, BaseItem item, string description)
+        {
+            var options = ExperienceOptions;
+            if (!options.EnableNotificationEnhance) return;
+
+            var admins = LibraryApi.AllUsers.Where(kvp => kvp.Value).Select(kvp => kvp.Key).ToList();
+            foreach (var admin in admins)
+            {
+                _notificationManager.SendNotification(new NotificationRequest
+                {
+                    Title = $"{Resources.PluginOptions_EditorTitle_Strm_Assistant} - {titleSuffix}",
+                    EventId = eventId,
+                    User = admin,
+                    Item = item,
+                    Description = description ?? string.Empty
+                });
+            }
         }
 
         public async Task SendMessageToAdmins(string text, long? timeout)
@@ -160,7 +216,7 @@ namespace StrmAssistant.Common
 
         private bool CanDisplayMessage(SessionInfo session)
         {
-            return session.SupportedCommands.Contains("DisplayMessage");
+            return session?.SupportedCommands?.Contains("DisplayMessage") == true;
         }
     }
 }
