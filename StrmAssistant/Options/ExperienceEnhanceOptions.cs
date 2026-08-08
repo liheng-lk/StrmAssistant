@@ -12,7 +12,7 @@ namespace StrmAssistant.Options
         public override string EditorTitle => Resources.ExperienceEnhanceOptions_EditorTitle_Experience_Enhance;
 
         [DisplayName("通知系统增强")]
-        [Description("启用 Strm Assistant 自定义通知事件。默认关闭，启用后才会发送收藏、片头片尾、深度删除等增强通知。")]
+        [Description("启用 Strm Assistant 自定义通知事件。默认关闭，启用后才会发送收藏、片头片尾、深度删除、元数据、图片和合集变更通知。")]
         [Required]
         public bool EnableNotificationEnhance { get; set; } = false;
 
@@ -30,6 +30,26 @@ namespace StrmAssistant.Options
         [Description("深度删除任务成功或预演完成后发送通知。")]
         [VisibleCondition(nameof(EnableNotificationEnhance), SimpleCondition.IsTrue)]
         public bool NotifyDeepDelete { get; set; } = true;
+
+        [DisplayName("元数据更新通知")]
+        [Description("仅在手工或 REST API 更新后、跟踪字段的值确实发生变化时发送 metadata.update。")]
+        [VisibleCondition(nameof(EnableNotificationEnhance), SimpleCondition.IsTrue)]
+        public bool NotifyMetadataUpdate { get; set; } = false;
+
+        [DisplayName("元数据更新跟踪字段")]
+        [Description("逗号分隔。支持 Name,Overview,OriginalTitle,Tagline,OfficialRating,CustomRating,CriticRating,CommunityRating,IndexNumber,ParentIndexNumber,PremiereDate,ProductionYear,EndDate,RunTimeTicks,Tags,Genres,Studios,ProductionLocations,ProviderIds。")]
+        [VisibleCondition(nameof(NotifyMetadataUpdate), SimpleCondition.IsTrue)]
+        public string MetadataUpdateTrackedFields { get; set; } = "Name,Overview,OriginalTitle,Tags,Genres";
+
+        [DisplayName("媒体图片更新通知")]
+        [Description("手工或 REST API 更新电影、合集、节目、季、集图像时发送 image.update。")]
+        [VisibleCondition(nameof(EnableNotificationEnhance), SimpleCondition.IsTrue)]
+        public bool NotifyImageUpdate { get; set; } = false;
+
+        [DisplayName("合集项目变更通知")]
+        [Description("合集新增或移除项目时发送 collection.items.added / collection.items.removed。")]
+        [VisibleCondition(nameof(EnableNotificationEnhance), SimpleCondition.IsTrue)]
+        public bool NotifyCollectionItemsUpdate { get; set; } = false;
 
         [DisplayName("深度删除")]
         [Description("启用安全深度删除能力。该功能不会绑定 Emby 的 ItemRemoved 事件自动删除文件，只允许由明确的用户删除动作调用。")]
@@ -52,7 +72,7 @@ namespace StrmAssistant.Options
         public bool DeepDeleteTargetFile { get; set; } = false;
 
         [DisplayName("删除关联文件")]
-        [Description("删除同名 NFO、JSON、图片、字幕等关联文件。当前阶段仅建立安全删除计划，后续接入主动删除入口。")]
+        [Description("删除与目标媒体文件同名前缀的 NFO、JSON、图片、字幕等关联文件。")]
         [VisibleCondition(nameof(EnableDeepDelete), SimpleCondition.IsTrue)]
         public bool DeepDeleteAssociatedFiles { get; set; } = true;
 
