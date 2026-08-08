@@ -8,6 +8,7 @@ using MediaBrowser.Model.Services;
 using StrmAssistant.Common;
 using StrmAssistant.Web.Api;
 using System;
+using System.Reflection;
 
 namespace StrmAssistant.Web.Service
 {
@@ -57,13 +58,33 @@ namespace StrmAssistant.Web.Service
             pluginOptions.ExperienceEnhanceOptions.HideCollectionsLibrary = true;
             Plugin.Instance.SavePluginOptionsSuppress();
 
-            // Emby's collection migration entry point uses this flag to decide whether it needs
-            // to recreate the historical collections virtual folder during startup migration.
-            _configurationManager.Configuration.CollectionsUpgraded = true;
-            _configurationManager.SaveConfiguration();
+            // Older Emby servers exposed a CollectionsUpgraded migration flag. Newer public SDKs
+            // removed it, so set it only when the runtime configuration still provides it.
+            MarkCollectionsMigrationCompleteIfSupported();
 
-            _libraryManager.RemoveVirtualFolder(collectionFolder.Name, false).GetAwaiter().GetResult();
+            _libraryManager.RemoveVirtualFolder(collectionFolder.InternalId, false);
             _logger.Info("Removed collections virtual folder and enabled HideCollectionsLibrary.");
+        }
+
+        private void MarkCollectionsMigrationCompleteIfSupported()
+        {
+            try
+            {
+                var configuration = _configurationManager.Configuration;
+                var property = configuration?.GetType().GetProperty(
+                    "CollectionsUpgraded",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+                if (property?.CanWrite == true && property.PropertyType == typeof(bool))
+                {
+                    property.SetValue(configuration, true);
+                    _configurationManager.SaveConfiguration();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("Unable to update legacy collections migration state: {0}", ex.Message);
+            }
         }
     }
 }
