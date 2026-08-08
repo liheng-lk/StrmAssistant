@@ -22,6 +22,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate embedded JavaScript
+        shell: pwsh
+        run: |
+          node --check StrmAssistant/Web/Resources/strmassistant.js
+          node --check StrmAssistant/Web/Resources/shortcuts.js
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
