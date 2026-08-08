@@ -34,6 +34,11 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnableExtractionBlacklist), SimpleCondition.IsTrue)]
         public string ExtractionBlacklistKeywords { get; set; } = string.Empty;
 
+        [DisplayName("外挂音轨扫描")]
+        [Description("扫描并更新电影/剧集旁的外挂音轨。需要 Emby Server 4.9.1.80 或更高版本；较旧版本会自动忽略此选项。")]
+        [Required]
+        public bool EnableExternalAudioTrackScan { get; set; } = true;
+
         [DisplayNameL("PluginOptions_EnableImageCapture_Enable_Image_Capture", typeof(Resources))]
         [DescriptionL("PluginOptions_EnableImageCapture_Perform_image_capture_for_videos_without_primary_image__Default_is_False_", typeof(Resources))]
         [Browsable(false)]
