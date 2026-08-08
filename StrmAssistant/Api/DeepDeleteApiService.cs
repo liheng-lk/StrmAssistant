@@ -117,9 +117,9 @@ namespace StrmAssistant.Api
                 return response;
             }
 
-            if (options.DeepDeleteTargetFile && !plan.Entries.Any(entry => entry.Kind == DeepDeleteEntryKind.StrmTarget))
+            if (options.DeepDeleteTargetFile && !plan.HasResolvedMediaTarget)
             {
-                response.Errors.Add("A local STRM target could not be resolved. Execution was aborted.");
+                response.Errors.Add("A local STRM or symbolic-link media target could not be resolved. Execution was aborted.");
                 return response;
             }
 
@@ -156,7 +156,7 @@ namespace StrmAssistant.Api
             if (actingUser != null && Plugin.NotificationApi != null)
             {
                 var targetPaths = plan.Entries
-                    .Where(entry => entry.Kind == DeepDeleteEntryKind.StrmTarget &&
+                    .Where(entry => DeepDeletePlan.IsMediaTarget(entry.Kind) &&
                                     response.DeletedPaths.Contains(entry.Path, StringComparer.OrdinalIgnoreCase))
                     .Select(entry => entry.Path);
 
