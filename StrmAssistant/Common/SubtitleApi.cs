@@ -27,8 +27,12 @@ namespace StrmAssistant.Common
 
         private readonly object _subtitleResolver;
         private readonly MethodInfo _getExternalSubtitleStreams;
+        private readonly object _audioTrackResolver;
+        private readonly MethodInfo _getExternalTracks;
         private readonly object _ffProbeSubtitleInfo;
         private readonly MethodInfo _updateExternalSubtitleStream;
+
+        private static readonly Version ExternalAudioMinVersion = new Version("4.9.1.80");
 
         private static readonly HashSet<string> ProbeExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { ".sub", ".smi", ".sami", ".mpl" };
@@ -45,7 +49,7 @@ namespace StrmAssistant.Common
             {
                 var embyProviders = Assembly.Load("Emby.Providers");
                 var subtitleResolverType = embyProviders.GetType("Emby.Providers.MediaInfo.SubtitleResolver");
-                var subtitleResolverConstructor = subtitleResolverType.GetConstructor(new[]
+                var subtitleResolverConstructor = subtitleResolverType?.GetConstructor(new[]
                 {
                     typeof(ILocalizationManager), typeof(IFileSystem), typeof(ILibraryManager)
                 });
@@ -53,15 +57,33 @@ namespace StrmAssistant.Common
                 {
                     localizationManager, fileSystem, libraryManager
                 });
-                _getExternalSubtitleStreams = subtitleResolverType.GetMethod("GetExternalSubtitleStreams");
+                _getExternalSubtitleStreams = subtitleResolverType?.GetMethod("GetExternalSubtitleStreams");
+
+                if (Plugin.Instance.ApplicationHost.ApplicationVersion >= ExternalAudioMinVersion)
+                {
+                    var audioTrackResolverType = embyProviders.GetType("Emby.Providers.MediaInfo.AudioTrackResolver");
+                    var audioTrackResolverConstructor = audioTrackResolverType?.GetConstructor(new[]
+                    {
+                        typeof(ILocalizationManager), typeof(IFileSystem), typeof(ILibraryManager)
+                    });
+                    _audioTrackResolver = audioTrackResolverConstructor?.Invoke(new object[]
+                    {
+                        localizationManager, fileSystem, libraryManager
+                    });
+
+                    var baseTrackResolverType = embyProviders.GetType("Emby.Providers.MediaInfo.BaseTrackResolver");
+                    _getExternalTracks = baseTrackResolverType?.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                        .FirstOrDefault(method => method.Name == "GetExternalTracks" &&
+                                                  method.GetParameters().Length == 6);
+                }
 
                 var ffProbeSubtitleInfoType = embyProviders.GetType("Emby.Providers.MediaInfo.FFProbeSubtitleInfo");
-                var ffProbeSubtitleInfoConstructor = ffProbeSubtitleInfoType.GetConstructor(new[]
+                var ffProbeSubtitleInfoConstructor = ffProbeSubtitleInfoType?.GetConstructor(new[]
                 {
                     typeof(IMediaProbeManager)
                 });
                 _ffProbeSubtitleInfo = ffProbeSubtitleInfoConstructor?.Invoke(new object[] { mediaProbeManager });
-                _updateExternalSubtitleStream = ffProbeSubtitleInfoType.GetMethod("UpdateExternalSubtitleStream");
+                _updateExternalSubtitleStream = ffProbeSubtitleInfoType?.GetMethod("UpdateExternalSubtitleStream");
             }
             catch (Exception e)
             {
@@ -77,24 +99,77 @@ namespace StrmAssistant.Common
             {
                 _logger.Warn($"{nameof(SubtitleApi)} Init Failed");
             }
+
+            if (Plugin.Instance.ApplicationHost.ApplicationVersion >= ExternalAudioMinVersion &&
+                (_audioTrackResolver is null || _getExternalTracks is null))
+            {
+                _logger.Warn("ExternalAudioTrack - Resolver unavailable on this Emby build.");
+            }
         }
+
+        public bool ExternalAudioSupported =>
+            Plugin.Instance.ApplicationHost.ApplicationVersion >= ExternalAudioMinVersion &&
+            _audioTrackResolver != null && _getExternalTracks != null;
+
+        private bool ExternalAudioEnabled => ExternalAudioSupported &&
+            Plugin.Instance.GetPluginOptions().MediaInfoExtractOptions.EnableExternalAudioTrackScan;
 
         private List<MediaStream> GetExternalSubtitleStreams(BaseItem item, int startIndex,
             IDirectoryService directoryService, bool clearCache)
         {
             var namingOptions = _libraryManager.GetNamingOptions();
 
-            return (List<MediaStream>)_getExternalSubtitleStreams.Invoke(_subtitleResolver,
+            var result = _getExternalSubtitleStreams?.Invoke(_subtitleResolver,
                 new object[] { item, startIndex, directoryService, namingOptions, clearCache });
+
+            if (result is List<MediaStream> list) return list;
+            if (result is IEnumerable<MediaStream> enumerable) return enumerable.ToList();
+            return new List<MediaStream>();
         }
 
-        private Task<bool> UpdateExternalSubtitleStream(BaseItem item,
-            MediaStream subtitleStream, MetadataRefreshOptions options, CancellationToken cancellationToken)
+        private List<MediaStream> GetExternalAudioStreams(BaseItem item, int startIndex,
+            IDirectoryService directoryService, bool clearCache)
+        {
+            if (!ExternalAudioEnabled || item == null || string.IsNullOrWhiteSpace(item.Path))
+                return new List<MediaStream>();
+
+            try
+            {
+                var libraryOptions = _libraryManager.GetLibraryOptions(item);
+                var namingOptions = _libraryManager.GetNamingOptions();
+                var result = _getExternalTracks.Invoke(_audioTrackResolver,
+                    new object[] { item, startIndex, directoryService, libraryOptions, namingOptions, clearCache });
+
+                var streams = result as IEnumerable<MediaStream>;
+                if (streams == null) return new List<MediaStream>();
+
+                return streams
+                    .Where(stream => stream != null && stream.Type == MediaStreamType.Audio &&
+                                     !string.IsNullOrWhiteSpace(stream.Path))
+                    .Select(stream =>
+                    {
+                        stream.IsExternal = true;
+                        stream.Protocol = MediaProtocol.File;
+                        return stream;
+                    })
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("ExternalAudioTrack - Resolve failed: {0}", item.Path);
+                _logger.Warn(ex.Message);
+                if (Plugin.Instance.DebugMode) _logger.Debug(ex.StackTrace);
+                return new List<MediaStream>();
+            }
+        }
+
+        private Task<bool> UpdateExternalStream(BaseItem item,
+            MediaStream stream, MetadataRefreshOptions options, CancellationToken cancellationToken)
         {
             var libraryOptions = _libraryManager.GetLibraryOptions(item);
 
             return (Task<bool>)_updateExternalSubtitleStream.Invoke(_ffProbeSubtitleInfo,
-                new object[] { item, subtitleStream, options, libraryOptions, cancellationToken });
+                new object[] { item, stream, options, libraryOptions, cancellationToken });
         }
 
         public MetadataRefreshOptions GetExternalSubtitleRefreshOptions()
@@ -113,24 +188,49 @@ namespace StrmAssistant.Common
 
         public bool HasExternalSubtitleChanged(BaseItem item, IDirectoryService directoryService, bool clearCache)
         {
-            var currentExternalSubtitleFiles = _libraryManager.GetExternalSubtitleFiles(item.InternalId);
-            var currentSet = new HashSet<string>(currentExternalSubtitleFiles, StringComparer.Ordinal);
+            if (item == null) return false;
 
             try
             {
-                var newExternalSubtitleFiles = GetExternalSubtitleStreams(item, 0, directoryService, clearCache)
-                    .Select(i => i.Path)
-                    .ToArray();
-                var newSet = new HashSet<string>(newExternalSubtitleFiles, StringComparer.Ordinal);
+                var currentSubtitleSet = new HashSet<string>(
+                    item.GetMediaStreams()
+                        .Where(stream => stream.IsExternal && stream.Type == MediaStreamType.Subtitle &&
+                                         !string.IsNullOrWhiteSpace(stream.Path))
+                        .Select(stream => NormalizePath(stream.Path)),
+                    StringComparer.OrdinalIgnoreCase);
 
-                return !currentSet.SetEquals(newSet);
+                var newSubtitleSet = new HashSet<string>(
+                    GetExternalSubtitleStreams(item, 0, directoryService, clearCache)
+                        .Where(stream => !string.IsNullOrWhiteSpace(stream.Path))
+                        .Select(stream => NormalizePath(stream.Path)),
+                    StringComparer.OrdinalIgnoreCase);
+
+                if (!currentSubtitleSet.SetEquals(newSubtitleSet)) return true;
+
+                if (!ExternalAudioEnabled) return false;
+
+                var currentAudioSet = new HashSet<string>(
+                    item.GetMediaStreams()
+                        .Where(stream => stream.IsExternal && stream.Type == MediaStreamType.Audio &&
+                                         !string.IsNullOrWhiteSpace(stream.Path))
+                        .Select(stream => NormalizePath(stream.Path)),
+                    StringComparer.OrdinalIgnoreCase);
+
+                var newAudioSet = new HashSet<string>(
+                    GetExternalAudioStreams(item, 0, directoryService, clearCache)
+                        .Where(stream => !string.IsNullOrWhiteSpace(stream.Path))
+                        .Select(stream => NormalizePath(stream.Path)),
+                    StringComparer.OrdinalIgnoreCase);
+
+                return !currentAudioSet.SetEquals(newAudioSet);
             }
-            catch
+            catch (Exception ex)
             {
-                // ignored
+                _logger.Warn("ExternalTrack - Change detection failed: {0}", item.Path);
+                _logger.Warn(ex.Message);
+                if (Plugin.Instance.DebugMode) _logger.Debug(ex.StackTrace);
+                return false;
             }
-
-            return false;
         }
 
         public async Task UpdateExternalSubtitles(BaseItem item, MetadataRefreshOptions refreshOptions, bool clearCache,
@@ -138,38 +238,57 @@ namespace StrmAssistant.Common
         {
             var directoryService = refreshOptions.DirectoryService;
             var currentStreams = item.GetMediaStreams()
-                .FindAll(i =>
-                    !(i.IsExternal && i.Type == MediaStreamType.Subtitle && i.Protocol == MediaProtocol.File));
-            var startIndex = currentStreams.Count == 0 ? 0 : currentStreams.Max(i => i.Index) + 1;
+                .FindAll(stream =>
+                    !(stream.IsExternal && stream.Protocol == MediaProtocol.File &&
+                      (stream.Type == MediaStreamType.Subtitle ||
+                       ExternalAudioEnabled && stream.Type == MediaStreamType.Audio)));
+            var startIndex = currentStreams.Count == 0 ? 0 : currentStreams.Max(stream => stream.Index) + 1;
 
-            if (GetExternalSubtitleStreams(item, startIndex, directoryService, clearCache) is
-                { } externalSubtitleStreams)
+            var externalSubtitleStreams = GetExternalSubtitleStreams(item, startIndex, directoryService, clearCache);
+            startIndex += externalSubtitleStreams.Count;
+            var externalAudioStreams = GetExternalAudioStreams(item, startIndex, directoryService, clearCache);
+
+            foreach (var subtitleStream in externalSubtitleStreams)
             {
-                foreach (var subtitleStream in externalSubtitleStreams)
+                var extension = Path.GetExtension(subtitleStream.Path);
+                if (!string.IsNullOrEmpty(extension) && ProbeExtensions.Contains(extension))
                 {
-                    var extension = Path.GetExtension(subtitleStream.Path);
-                    if (!string.IsNullOrEmpty(extension) && ProbeExtensions.Contains(extension))
-                    {
-                        var result =
-                            await UpdateExternalSubtitleStream(item, subtitleStream, refreshOptions,
-                                CancellationToken.None).ConfigureAwait(false);
+                    var result = await UpdateExternalStream(item, subtitleStream, refreshOptions,
+                        CancellationToken.None).ConfigureAwait(false);
 
-                        if (!result)
-                            _logger.Warn("No result when probing external subtitle file: {0}", subtitleStream.Path);
-                    }
-
-                    _logger.Info("ExternalSubtitle - Subtitle Processed: " + subtitleStream.Path);
+                    if (!result)
+                        _logger.Warn("No result when probing external subtitle file: {0}", subtitleStream.Path);
                 }
 
-                currentStreams.AddRange(externalSubtitleStreams);
-                _itemRepository.SaveMediaStreams(item.InternalId, currentStreams, CancellationToken.None);
-
-                if (persistMediaInfo && Plugin.LibraryApi.IsLibraryInScope(item))
-                {
-                    _ = Plugin.MediaInfoApi.SerializeMediaInfo(item.InternalId, directoryService, true,
-                        "External Subtitle Update").ConfigureAwait(false);
-                }
+                _logger.Info("ExternalSubtitle - Subtitle Processed: " + subtitleStream.Path);
             }
+
+            foreach (var audioStream in externalAudioStreams)
+            {
+                var result = await UpdateExternalStream(item, audioStream, refreshOptions,
+                    CancellationToken.None).ConfigureAwait(false);
+
+                if (!result)
+                    _logger.Warn("ExternalAudioTrack - No result when probing: {0}", audioStream.Path);
+
+                _logger.Info("ExternalAudioTrack - Audio Processed: " + audioStream.Path);
+            }
+
+            currentStreams.AddRange(externalSubtitleStreams);
+            currentStreams.AddRange(externalAudioStreams);
+            _itemRepository.SaveMediaStreams(item.InternalId, currentStreams, CancellationToken.None);
+
+            if (persistMediaInfo && Plugin.LibraryApi.IsLibraryInScope(item))
+            {
+                _ = Plugin.MediaInfoApi.SerializeMediaInfo(item.InternalId, directoryService, true,
+                    externalAudioStreams.Count > 0 ? "External Track Update" : "External Subtitle Update")
+                    .ConfigureAwait(false);
+            }
+        }
+
+        private static string NormalizePath(string path)
+        {
+            return string.IsNullOrWhiteSpace(path) ? string.Empty : path.Trim();
         }
     }
 }
