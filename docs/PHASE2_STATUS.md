@@ -37,6 +37,7 @@ This document tracks implementation and validation of the media-enhancement port
 ## Still to implement in Phase 2
 
 - [ ] ISO MediaInfo extraction/mount workflow.
+- [ ] ISO/BDMV MPLS language/chapter enrichment.
 - [ ] ISO image-capture support.
 - [ ] Distributed extraction / rffmpeg configuration and health checks.
 - [ ] Custom ffmpeg executable support where needed by image capture.
@@ -44,9 +45,11 @@ This document tracks implementation and validation of the media-enhancement port
 
 ## Validation gates
 
-- [ ] Emby Core 4.8.0.80 compile/package after current Phase 2 changes.
-- [ ] Emby Core 4.9.1.90 compile/package after current Phase 2 changes.
-- [ ] Emby Core 4.10.0.1-beta compile/package after current Phase 2 changes.
+GitHub Actions run `31255226989` completed successfully after the blacklist, music persistence and external-audio changes:
+
+- [x] Emby Core 4.8.0.80 compile/package/artifact.
+- [x] Emby Core 4.9.1.90 compile/package/artifact.
+- [x] Emby Core 4.10.0.1-beta compile/package/artifact.
 - [ ] Real Emby 4.9.5 runtime: external audio resolver initialization.
 - [ ] Real movie/episode external-audio add/remove/rescan test.
 - [ ] Music JSON save/restore test with embedded artwork.
