@@ -42,6 +42,10 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Install ILRepack
+        shell: pwsh
+        run: dotnet tool install -g dotnet-ilrepack --version 2.0.44
+
       - name: Restore, build and package
         shell: pwsh
         run: |
