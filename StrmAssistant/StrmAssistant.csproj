@@ -9,6 +9,8 @@
     <EmbyServerCoreVersion Condition="'$(EmbyServerCoreVersion)' == ''">4.8.0.80</EmbyServerCoreVersion>
     <PluginOutputDir Condition="'$(PluginOutputDir)' == ''">$(MSBuildProjectDirectory)\..\artifacts</PluginOutputDir>
     <PluginOutputPath>$(PluginOutputDir)\$(TargetFileName)</PluginOutputPath>
+    <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' == 'Windows_NT'">$(UserProfile)\.dotnet\tools\ilrepack.exe</ILRepackExe>
+    <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' != 'Windows_NT'">$(HOME)/.dotnet/tools/ilrepack</ILRepackExe>
   </PropertyGroup>
   <ItemGroup>
     <None Remove="Web\Resources\shortcuts.js" />
@@ -53,7 +55,8 @@
     </EmbeddedResource>
   </ItemGroup>
   <Target Name="PackagePlugin" DependsOnTargets="Build">
+    <Error Condition="!Exists('$(ILRepackExe)')" Text="ILRepack tool not found at $(ILRepackExe). Install it with: dotnet tool install -g dotnet-ilrepack" />
     <MakeDir Directories="$(PluginOutputDir)" />
-    <Exec Command="&quot;$(ILRepack)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(TargetPath)&quot; &quot;$(TargetDir)ChineseConverter.dll&quot; /lib:&quot;$(TargetDir)&quot;" />
+    <Exec Command="&quot;$(ILRepackExe)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(TargetPath)&quot; &quot;$(TargetDir)ChineseConverter.dll&quot; /lib:&quot;$(TargetDir)&quot;" />
   </Target>
 </Project>
