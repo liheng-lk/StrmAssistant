@@ -33,6 +33,7 @@ namespace StrmAssistant.Experience
     {
         public bool DryRun { get; set; }
         public List<string> DeletedPaths { get; } = new List<string>();
+        public List<string> DeletedDirectories { get; } = new List<string>();
         public List<string> SkippedPaths { get; } = new List<string>();
         public List<string> Errors { get; } = new List<string>();
     }
@@ -42,8 +43,7 @@ namespace StrmAssistant.Experience
     ///
     /// This service intentionally does NOT subscribe to ILibraryManager.ItemRemoved. A library
     /// scan can remove database items for many reasons that are not an explicit user delete.
-    /// A later integration layer must call this service only after an authenticated, explicit
-    /// delete request has been identified.
+    /// It is invoked only by the authenticated plugin-owned deep-delete API.
     /// </summary>
     public sealed class DeepDeleteService
     {
@@ -80,7 +80,7 @@ namespace StrmAssistant.Experience
 
             if (!string.Equals(Path.GetExtension(sourcePath), ".strm", StringComparison.OrdinalIgnoreCase))
             {
-                plan.Warnings.Add("Phase 1 deep delete currently resolves local targets only from .strm files.");
+                plan.Warnings.Add("Deep delete currently resolves local targets from .strm files. Symlink target resolution will be added separately.");
                 return plan;
             }
 
@@ -145,10 +145,60 @@ namespace StrmAssistant.Experience
                 }
             }
 
-            // Empty-directory cleanup is intentionally deferred until the explicit-delete
-            // integration is implemented. It needs the authenticated delete context and the
-            // exact media/library boundary to avoid walking beyond a user's intended target.
+            if (!options.DeepDeleteDryRun && options.DeepDeleteEmptyDirectories && result.Errors.Count == 0)
+            {
+                CleanupEmptyDirectories(result, options.DeepDeleteAllowedRoots);
+            }
+
             return result;
+        }
+
+        private static void CleanupEmptyDirectories(DeepDeleteExecutionResult result, string allowedRootsRaw)
+        {
+            var allowedRoots = ParseAllowedRoots(allowedRootsRaw);
+            if (allowedRoots.Count == 0 || result.DeletedPaths.Count == 0) return;
+
+            var candidateDirectories = result.DeletedPaths
+                .Select(path =>
+                {
+                    try { return Path.GetDirectoryName(Path.GetFullPath(path)); }
+                    catch { return null; }
+                })
+                .Where(path => !string.IsNullOrEmpty(path))
+                .Distinct(PathComparer)
+                .OrderByDescending(path => path.Length)
+                .ToList();
+
+            foreach (var startDirectory in candidateDirectories)
+            {
+                var root = allowedRoots
+                    .Where(candidateRoot => IsWithinRoot(startDirectory, candidateRoot))
+                    .OrderByDescending(candidateRoot => candidateRoot.Length)
+                    .FirstOrDefault();
+
+                if (string.IsNullOrEmpty(root)) continue;
+
+                var current = startDirectory;
+                while (!string.IsNullOrEmpty(current) &&
+                       !string.Equals(current, root, PathComparison) &&
+                       IsWithinRoot(current, root))
+                {
+                    try
+                    {
+                        if (!Directory.Exists(current)) break;
+                        if (Directory.EnumerateFileSystemEntries(current).Any()) break;
+
+                        Directory.Delete(current, false);
+                        result.DeletedDirectories.Add(current);
+                        current = Path.GetDirectoryName(current);
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Errors.Add($"Directory cleanup {current}: {ex.Message}");
+                        break;
+                    }
+                }
+            }
         }
 
         private static void AddAssociatedFiles(DeepDeletePlan plan, string targetPath, IReadOnlyCollection<string> allowedRoots)
