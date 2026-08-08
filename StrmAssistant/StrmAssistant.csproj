@@ -5,7 +5,10 @@
     <FileVersion>2.0.0.27</FileVersion>
     <CopyLocalLockFileAssemblies>True</CopyLocalLockFileAssemblies>
     <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
-    <AssemblyName>$(MSBuildProjectName)Lite</AssemblyName>
+    <AssemblyName>StrmAssistantCustom</AssemblyName>
+    <EmbyServerCoreVersion Condition="'$(EmbyServerCoreVersion)' == ''">4.8.0.80</EmbyServerCoreVersion>
+    <PluginOutputDir Condition="'$(PluginOutputDir)' == ''">$(MSBuildProjectDirectory)\..\artifacts</PluginOutputDir>
+    <PluginOutputPath>$(PluginOutputDir)\$(TargetFileName)</PluginOutputPath>
   </PropertyGroup>
   <ItemGroup>
     <None Remove="Web\Resources\shortcuts.js" />
@@ -23,7 +26,7 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="mediabrowser.server.core" Version="4.8.0.80" />
+    <PackageReference Include="mediabrowser.server.core" Version="$(EmbyServerCoreVersion)" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -49,7 +52,8 @@
       <DependentUpon>Resources.resx</DependentUpon>
     </EmbeddedResource>
   </ItemGroup>
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="$(ILRepack) /out:%25AppData%25\Emby-Server\programdata\plugins\$(TargetFileName) $(TargetPath) $(TargetDir)ChineseConverter.dll /lib:$(TargetDir)" />
+  <Target Name="PackagePlugin" DependsOnTargets="Build">
+    <MakeDir Directories="$(PluginOutputDir)" />
+    <Exec Command="&quot;$(ILRepack)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(TargetPath)&quot; &quot;$(TargetDir)ChineseConverter.dll&quot; /lib:&quot;$(TargetDir)&quot;" />
   </Target>
 </Project>
