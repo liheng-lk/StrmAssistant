@@ -77,9 +77,14 @@ namespace StrmAssistant.Options
         public bool DeepDeleteAssociatedFiles { get; set; } = true;
 
         [DisplayName("清理空目录")]
-        [Description("删除完成后清理允许根目录内的空目录。默认关闭。")]
+        [Description("删除完成后清理允许根目录内的空目录；不会删除允许根目录本身。默认关闭。")]
         [VisibleCondition(nameof(EnableDeepDelete), SimpleCondition.IsTrue)]
         public bool DeepDeleteEmptyDirectories { get; set; } = false;
+
+        [DisplayName("隐藏合集媒体库")]
+        [Description("将 Emby 的 BoxSets/合集顶级媒体库加入所有用户的 MyMediaExcludes，仅从用户界面隐藏，不删除合集和刮削配置。关闭后只撤销由本插件添加的隐藏项。")]
+        [Required]
+        public bool HideCollectionsLibrary { get; set; } = false;
 
         [DisplayNameL("GeneralOptions_MergeMultiVersion_Merge_Multiple_Versions", typeof(Resources))]
         [DescriptionL("GeneralOptions_MergeMultiVersion_Auto_merge_multiple_versions_if_in_the_same_folder_", typeof(Resources))]
