@@ -1,0 +1,60 @@
+name: Emby Compatibility Watch
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  resolve-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+    steps:
+      - name: Resolve latest Emby core packages
+        id: versions
+        shell: pwsh
+        run: |
+          $index = Invoke-RestMethod "https://api.nuget.org/v3-flatcontainer/mediabrowser.server.core/index.json"
+          $stable = $index.versions | Where-Object { $_ -notmatch '-' } | Select-Object -Last 1
+          $prerelease = $index.versions | Where-Object { $_ -match '-' } | Select-Object -Last 1
+          $targets = @($stable, $prerelease) | Where-Object { $_ } | Sort-Object -Unique
+          $matrix = $targets | ConvertTo-Json -Compress -AsArray
+          "matrix=$matrix" >> $env:GITHUB_OUTPUT
+          Write-Host "Compatibility targets: $matrix"
+
+  build-latest:
+    needs: resolve-versions
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emby_core: ${{ fromJSON(needs.resolve-versions.outputs.matrix) }}
+
+    name: Latest Emby Core ${{ matrix.emby_core }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore, build and package
+        shell: pwsh
+        run: |
+          dotnet msbuild StrmAssistant/StrmAssistant.csproj `
+            -restore `
+            -t:PackagePlugin `
+            -p:Configuration=Release `
+            -p:EmbyServerCoreVersion=${{ matrix.emby_core }} `
+            -p:PluginOutputDir="${{ github.workspace }}\artifacts\${{ matrix.emby_core }}"
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StrmAssistantCustom-latest-${{ matrix.emby_core }}
+          path: artifacts/${{ matrix.emby_core }}/StrmAssistantCustom.dll
+          if-no-files-found: error
