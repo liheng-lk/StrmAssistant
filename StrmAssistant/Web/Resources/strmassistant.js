@@ -72,23 +72,26 @@
                 loading.show();
 
                 let apiClient = connectionManager.currentApiClient();
-                let deleteApi = apiClient.getUrl('Library/VirtualFolders/Delete');
+                let deleteApi = apiClient.getUrl('StrmAssistant/Library/Collections/Delete');
 
-                apiClient.ajax({
+                return apiClient.ajax({
                     type: "POST",
-                    url: deleteApi + "?refreshLibrary=false&id=" + libraryId,
-                    data: {},
+                    url: deleteApi,
+                    data: JSON.stringify({ Id: libraryId }),
                     contentType: "application/json"
-                }).finally(() => {
-                    loading.hide();
+                }).then(() => {
                     const locale = globalize.getCurrentLocale().toLowerCase();
                     const confirmMessage = (locale === 'zh-cn') ? '\u5408\u96c6\u5220\u9664\u6210\u529f' :
-                        (['zh-hk', 'zh-tw'].includes(locale) ? '\u5408\u96C6\u5236\u9662\u6210\u529F' : 'Delete Collections Success');
+                        (['zh-hk', 'zh-tw'].includes(locale) ? '\u5408\u96C6\u522A\u9664\u6210\u529F' : 'Delete Collections Success');
                     toast(confirmMessage);
                     const itemsContainer = document.querySelector('.view-librarysetup-library .itemsContainer, .view-librarysetup-librarysetup .itemsContainer');
                     if (itemsContainer) {
                         itemsContainer.notifyRefreshNeeded(true);
                     }
+                }).catch(error => {
+                    toast(error?.message || 'Delete Collections failed');
+                }).finally(() => {
+                    loading.hide();
                 });
             });
         },
