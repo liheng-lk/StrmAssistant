@@ -19,6 +19,21 @@ namespace StrmAssistant.Options
         [Required]
         public bool IncludeExtra { get; set; } = false;
 
+        [DisplayName("提取黑名单")]
+        [Description("对媒体信息提取、片头声纹和视频预览缩略图使用统一过滤规则。默认关闭。")]
+        [Required]
+        public bool EnableExtractionBlacklist { get; set; } = false;
+
+        [DisplayName("黑名单标签")]
+        [Description("逗号、分号或换行分隔。媒体命中任意标签时跳过 MediaInfo、声纹和 BIF/缩略图任务。")]
+        [VisibleCondition(nameof(EnableExtractionBlacklist), SimpleCondition.IsTrue)]
+        public string ExtractionBlacklistTags { get; set; } = string.Empty;
+
+        [DisplayName("黑名单关键词")]
+        [Description("逗号、分号或换行分隔。名称、原始标题或媒体路径命中任意关键词时跳过 MediaInfo、声纹和 BIF/缩略图任务。")]
+        [VisibleCondition(nameof(EnableExtractionBlacklist), SimpleCondition.IsTrue)]
+        public string ExtractionBlacklistKeywords { get; set; } = string.Empty;
+
         [DisplayNameL("PluginOptions_EnableImageCapture_Enable_Image_Capture", typeof(Resources))]
         [DescriptionL("PluginOptions_EnableImageCapture_Perform_image_capture_for_videos_without_primary_image__Default_is_False_", typeof(Resources))]
         [Browsable(false)]
@@ -50,6 +65,11 @@ namespace StrmAssistant.Options
         [SelectItemsSource(nameof(PersistMediaInfoOptionList))]
         [SelectShowRadioGroup]
         public string PersistMediaInfoMode { get; set; } = PersistMediaInfoOption.None.ToString();
+
+        [DisplayName("音乐媒体信息持久化")]
+        [Description("将音乐 Audio 条目的媒体流信息和主图一并写入/恢复 MediaInfo JSON。底层序列化已支持音频和嵌入图片。")]
+        [VisibleCondition(nameof(PersistMediaInfoMode), ValueCondition.IsNotEqual, PersistMediaInfoOption.None)]
+        public bool PersistMusicMediaInfo { get; set; } = false;
 
         [DisplayNameL("MediaInfoExtractOptions_MediaInfoJsonRootFolder_MediaInfo_Json_Root_Folder", typeof(Resources))]
         [DescriptionL("MediaInfoExtractOptions_MediaInfoJsonRootFolder_Store_or_load_media_info_JSON_files_under_this_root_folder__Default_is_EMPTY_", typeof(Resources))]
