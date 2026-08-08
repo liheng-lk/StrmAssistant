@@ -11,6 +11,7 @@ using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Querying;
+using StrmAssistant.MediaEnhance;
 using StrmAssistant.Options;
 using StrmAssistant.Properties;
 using System;
@@ -423,7 +424,8 @@ namespace StrmAssistant.Common
                 .GroupBy(i => i.InternalId)
                 .Select(g => g.First())
                 .ToList();
-            var results = OrderByDescending(combined);
+            var filtered = MediaExtractionFilter.Apply(combined).ToList();
+            var results = OrderByDescending(filtered);
 
             return results;
         }
@@ -487,7 +489,7 @@ namespace StrmAssistant.Common
                 }
                 else if (item is Video)
                 {
-                    _logger.Debug("MediaInfoExtract - Item dropped: " + item.Name + " - " + item.Path); // video without audio
+                    _logger.Debug("MediaInfoExtract - Item dropped: " + item.Name + " - " + item.Path);
                 }
             }
 
@@ -498,6 +500,13 @@ namespace StrmAssistant.Common
 
         public bool IsExtractNeeded(BaseItem item, bool enableImageCapture)
         {
+            if (MediaExtractionFilter.ShouldSkip(item, out var blacklistReason))
+            {
+                _logger.Info("MediaInfoExtract - Skipped by extraction blacklist: {0} ({1})", item.Path,
+                    blacklistReason);
+                return false;
+            }
+
             if (item.MediaContainer.HasValue && ExcludeMediaContainers.Contains(item.MediaContainer.Value))
                 return false;
 
@@ -645,8 +654,17 @@ namespace StrmAssistant.Common
 
         public async Task<bool?> OrchestrateMediaInfoProcessAsync(BaseItem taskItem, string source, CancellationToken cancellationToken)
         {
-            var persistMediaInfoMode = Plugin.Instance.GetPluginOptions().MediaInfoExtractOptions.PersistMediaInfoMode;
-            var persistMediaInfo = taskItem is Video && persistMediaInfoMode != PersistMediaInfoOption.None.ToString();
+            if (MediaExtractionFilter.ShouldSkip(taskItem, out var blacklistReason))
+            {
+                _logger.Info("MediaInfoExtract - Orchestration skipped by extraction blacklist: {0} ({1})",
+                    taskItem.Path, blacklistReason);
+                return null;
+            }
+
+            var mediaInfoOptions = Plugin.Instance.GetPluginOptions().MediaInfoExtractOptions;
+            var persistMediaInfoMode = mediaInfoOptions.PersistMediaInfoMode;
+            var persistMediaInfo = persistMediaInfoMode != PersistMediaInfoOption.None.ToString() &&
+                                   (taskItem is Video || taskItem is Audio && mediaInfoOptions.PersistMusicMediaInfo);
             var mediaInfoRestoreMode = persistMediaInfoMode == PersistMediaInfoOption.Restore.ToString();
 
             var filePath = taskItem.Path;
@@ -693,7 +711,8 @@ namespace StrmAssistant.Common
 
                 if (deserializeResult)
                 {
-                    if (Plugin.SubtitleApi.HasExternalSubtitleChanged(taskItem, directoryService, true))
+                    if (taskItem is Video &&
+                        Plugin.SubtitleApi.HasExternalSubtitleChanged(taskItem, directoryService, true))
                     {
                         await Plugin.SubtitleApi.UpdateExternalSubtitles(taskItem, refreshOptions, false, true)
                             .ConfigureAwait(false);
@@ -819,7 +838,7 @@ namespace StrmAssistant.Common
             var path = strmPath.AsMemory();
 
             using var mediaMount = await _mediaMountManager.Mount(path, null, CancellationToken.None);
-            
+
             return mediaMount?.MountedPath;
         }
 
