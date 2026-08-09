@@ -100,7 +100,7 @@ namespace StrmAssistant.IntroSkip
                     .OrderBy(c => c.StartPositionTicks)
                     .ThenBy(c => (int)c.MarkerType)
                     .ToList();
-                _itemRepository.SaveChapters(episode.Id, chapters);
+                _itemRepository.SaveChapters(episode.InternalId, chapters);
 
                 Plugin.Instance?.Logger?.Info(
                     "Unified IntroDb auto-applied markers for {0} S{1:00}E{2:00} ({3}).",
