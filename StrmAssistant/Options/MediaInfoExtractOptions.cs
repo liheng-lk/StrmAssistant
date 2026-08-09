@@ -129,6 +129,16 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnableDistributedChapterImageRouting), SimpleCondition.IsTrue)]
         public int DistributedChapterImageTimeoutSeconds { get; set; } = 120;
 
+        public enum ImageCaptureAspectRatioOption
+        {
+            [Description("保持原始比例")]
+            Source,
+            [Description("横图 16:9（居中裁剪）")]
+            Landscape16x9,
+            [Description("竖图 2:3（居中裁剪）")]
+            Portrait2x3
+        }
+
         [DisplayName("自定义 / ISO 截图（实验）")]
         [Description("启用管理员手动 Plan/Apply 单帧截图。支持普通视频以及已启用光盘媒体探测的 Blu-ray ISO/BDMV；不会自动批量覆盖封面。")]
         [Required]
@@ -144,6 +154,11 @@ namespace StrmAssistant.Options
         [Required]
         [VisibleCondition(nameof(EnableCustomImageCapture), SimpleCondition.IsTrue)]
         public bool EnableDistributedImageCapture { get; set; } = false;
+
+        [DisplayName("截图画面比例")]
+        [Description("默认保持视频原始比例。可选择居中裁剪为 16:9 横图或 2:3 竖图；只影响本插件生成的新截图。")]
+        [VisibleCondition(nameof(EnableCustomImageCapture), SimpleCondition.IsTrue)]
+        public ImageCaptureAspectRatioOption ImageCaptureAspectRatio { get; set; } = ImageCaptureAspectRatioOption.Source;
 
         [DisplayName("截图超时（秒）")]
         [Description("单次 ffmpeg 截图最长运行时间。默认 120 秒。")]
