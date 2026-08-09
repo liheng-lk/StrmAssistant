@@ -62,17 +62,17 @@ namespace StrmAssistant.Options
         public bool EnableOpticalMediaWriteBack { get; set; } = false;
 
         [DisplayName("分布式提取工具自检（实验）")]
-        [Description("启用自定义 ffprobe/ffmpeg 与 rffmpeg 的只读诊断设置。当前阶段不会自动替换 Emby 全局 ffmpeg 路径。")]
+        [Description("启用自定义 ffprobe/ffmpeg 与 rffmpeg 的诊断设置。可先运行 Health 接口验证 worker/协议/滤镜能力。")]
         [Required]
         public bool EnableDistributedExtractDiagnostics { get; set; } = false;
 
         [DisplayName("分布式 ffprobe 路径")]
-        [Description("可填写 rffmpeg 的 ffprobe 软链接/包装器路径；留空使用 PATH 中的 ffprobe。")]
+        [Description("填写 rffmpeg 的 ffprobe 软链接/包装器路径，或其他兼容 ffprobe。留空使用 PATH 中的 ffprobe。真正启用分布式路由时建议明确填写。")]
         [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
         public string DistributedFfprobeExecutablePath { get; set; } = string.Empty;
 
         [DisplayName("分布式 ffmpeg 路径")]
-        [Description("可填写 rffmpeg 的 ffmpeg 软链接/包装器路径；留空使用 PATH 中的 ffmpeg。")]
+        [Description("可填写 rffmpeg 的 ffmpeg 软链接/包装器路径；留空使用 PATH 中的 ffmpeg。后续用于截图、BIF、声纹等重任务。")]
         [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
         public string DistributedFfmpegExecutablePath { get; set; } = string.Empty;
 
@@ -86,6 +86,30 @@ namespace StrmAssistant.Options
         [Required, MinValue(5), MaxValue(120)]
         [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
         public int DistributedToolTimeoutSeconds { get; set; } = 30;
+
+        [DisplayName("启用分布式 MediaInfo 路由（实验）")]
+        [Description("默认关闭。开启后，普通视频/音频的 MediaInfo 提取优先调用上方配置的 ffprobe/rffmpeg 包装器，而不是先进入 Emby 原生 ffprobe 流程。ISO/BDMV 仍走独立光盘媒体流程。")]
+        [Required]
+        [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
+        public bool EnableDistributedExtractRouting { get; set; } = false;
+
+        [DisplayName("分布式失败时回退 Emby 原生提取")]
+        [Description("建议保持开启。远端 ffprobe、SSH、worker 或共享路径异常时，自动回退当前 Emby 原生 MediaInfo 提取，避免任务永久卡住。")]
+        [Required]
+        [VisibleCondition(nameof(EnableDistributedExtractRouting), SimpleCondition.IsTrue)]
+        public bool DistributedExtractFallbackToEmby { get; set; } = true;
+
+        [DisplayName("允许 STRM 使用分布式 MediaInfo")]
+        [Description("默认关闭。STRM 挂载后得到的临时/转换路径通常无法在远端 worker 复用；只有确认 Emby 与 worker 看见完全相同的目标路径时再开启。")]
+        [Required]
+        [VisibleCondition(nameof(EnableDistributedExtractRouting), SimpleCondition.IsTrue)]
+        public bool EnableDistributedExtractForStrm { get; set; } = false;
+
+        [DisplayName("分布式 MediaInfo 超时（秒）")]
+        [Description("单个远端 ffprobe/rffmpeg MediaInfo 任务最长运行时间。默认 600 秒。")]
+        [Required, MinValue(30), MaxValue(3600)]
+        [VisibleCondition(nameof(EnableDistributedExtractRouting), SimpleCondition.IsTrue)]
+        public int DistributedExtractTimeoutSeconds { get; set; } = 600;
 
         [DisplayNameL("PluginOptions_EnableImageCapture_Enable_Image_Capture", typeof(Resources))]
         [DescriptionL("PluginOptions_EnableImageCapture_Perform_image_capture_for_videos_without_primary_image__Default_is_False_", typeof(Resources))]
