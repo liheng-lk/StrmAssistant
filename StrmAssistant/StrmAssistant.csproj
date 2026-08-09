@@ -59,13 +59,18 @@
     </EmbeddedResource>
   </ItemGroup>
   <Target Name="PackagePlugin" DependsOnTargets="Build">
+    <ItemGroup>
+      <HarmonyCandidate Include="$(PkgLib_Harmony)\**\netstandard2.0\0Harmony.dll" />
+    </ItemGroup>
     <PropertyGroup>
-      <HarmonyPath>$(PkgLib_Harmony)\lib\netstandard2.0\0Harmony.dll</HarmonyPath>
+      <HarmonyPath>@(HarmonyCandidate)</HarmonyPath>
     </PropertyGroup>
+    <Message Importance="High" Text="Harmony package root: $(PkgLib_Harmony)" />
+    <Message Importance="High" Text="Harmony candidate: $(HarmonyPath)" />
     <Error Condition="!Exists('$(ILRepackExe)')" Text="ILRepack tool not found at $(ILRepackExe). Install it with: dotnet tool install -g dotnet-ilrepack" />
     <Error Condition="!Exists('$(PluginInputPath)')" Text="Plugin input not found at $(PluginInputPath)" />
     <Error Condition="!Exists('$(ChineseConverterPath)')" Text="ChineseConverter input not found at $(ChineseConverterPath)" />
-    <Error Condition="!Exists('$(HarmonyPath)')" Text="Harmony input not found at $(HarmonyPath) (PkgLib_Harmony=$(PkgLib_Harmony))" />
+    <Error Condition="'$(HarmonyPath)' == '' or !Exists('$(HarmonyPath)')" Text="Harmony fat assembly was not found under $(PkgLib_Harmony)." />
     <MakeDir Directories="$(PluginOutputDir)" />
     <Exec Command="&quot;$(ILRepackExe)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(PluginInputPath)&quot; &quot;$(HarmonyPath)&quot; &quot;$(ChineseConverterPath)&quot; /lib:&quot;$(PluginBuildDir)&quot;" />
   </Target>
