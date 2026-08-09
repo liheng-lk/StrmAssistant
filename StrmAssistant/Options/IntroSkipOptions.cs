@@ -74,13 +74,13 @@ namespace StrmAssistant.Options
         public bool EnableOnlineIntroDb { get; set; } = true;
 
         [DisplayName("使用 IntroDB.app")]
-        [Description("内置接口：https://api.introdb.app/segments；若新接口没有完整片头数据，会回退 https://api.introdb.app/intro。按剧集 IMDb ID + 季号 + 集号匹配。")]
+        [Description("当前公开接口：https://api.introdb.app/segments；读取无需 API Key。若新接口没有完整片头数据，会回退 https://api.introdb.app/intro。按剧集 IMDb ID + 季号 + 集号匹配。")]
         [Required]
         [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
         public bool IntroDbAppEnabled { get; set; } = true;
 
         [DisplayName("使用 TheIntroDB.org")]
-        [Description("内置接口：https://api.theintrodb.org/v2/media。按剧集 TMDB ID + 季号 + 集号匹配，可返回片头、回顾、片尾/预告分段。")]
+        [Description("当前接口：https://api.theintrodb.org/v3/media。按 TMDB/IMDb ID + 季号 + 集号 + 实际媒体时长匹配，可返回片头、回顾、片尾和预告分段；v3 无结果时保留 v2 兼容回退。")]
         [Required]
         [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
         public bool TheIntroDbEnabled { get; set; } = true;
@@ -92,7 +92,7 @@ namespace StrmAssistant.Options
         public bool CustomIntroDbEnabled { get; set; } = false;
 
         [DisplayName("自定义片头数据库 URL 模板")]
-        [Description("支持 {series_tmdb}、{series_imdb}、{episode_tmdb}、{episode_imdb}、{season}、{episode}、{series_name}、{episode_name} 占位符。")]
+        [Description("支持 {series_tmdb}、{series_imdb}、{episode_tmdb}、{episode_imdb}、{season}、{episode}、{series_name}、{episode_name}、{duration_ms} 占位符。")]
         [VisibleCondition(nameof(CustomIntroDbEnabled), SimpleCondition.IsTrue)]
         public string CustomIntroDbEndpointTemplate { get; set; } = string.Empty;
 
@@ -102,7 +102,7 @@ namespace StrmAssistant.Options
         public string IntroDbProviderOrder { get; set; } = "IntroDbApp,TheIntroDb,Custom";
 
         [DisplayName("在线匹配缓存（分钟）")]
-        [Description("相同剧集匹配结果的缓存时间，0 表示不缓存。")]
+        [Description("相同剧集匹配结果的缓存时间，0 表示不缓存。不同媒体时长使用不同缓存键。")]
         [MinValue(0), MaxValue(1440)]
         [Required]
         [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
