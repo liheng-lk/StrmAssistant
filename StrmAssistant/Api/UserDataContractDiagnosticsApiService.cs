@@ -3,9 +3,12 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Services;
+using StrmAssistant.Compatibility;
+using StrmAssistant.Experience;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 
@@ -21,6 +24,8 @@ namespace StrmAssistant.Api
         public List<string> UserDataKeys { get; set; } = new List<string>();
         public List<string> AlternateVersionIds { get; set; } = new List<string>();
         public Dictionary<string, string> ObservedProperties { get; set; } = new Dictionary<string, string>();
+        public bool WouldUseIsolatedKey { get; set; }
+        public string ProposedIsolatedKey { get; set; }
         public List<string> Notes { get; set; } = new List<string>();
     }
 
@@ -28,6 +33,8 @@ namespace StrmAssistant.Api
     {
         public bool Success { get; set; }
         public string RequestedId { get; set; }
+        public bool IsolationEnabled { get; set; }
+        public MultiVersionUserDataIsolationCapabilityStatus IsolationRuntimePatch { get; set; }
         public UserDataContractItem Primary { get; set; }
         public List<UserDataContractItem> AlternateVersions { get; set; } = new List<UserDataContractItem>();
         public List<string> DiscoveredKeyMethods { get; set; } = new List<string>();
@@ -44,8 +51,8 @@ namespace StrmAssistant.Api
     }
 
     /// <summary>
-    /// Read-only contract discovery used before implementing independent cross-library progress/favorites.
-    /// It invokes only zero-argument BaseItem key/id accessors and never touches IUserDataManager or a database.
+    /// Read-only contract discovery used before enabling independent cross-library progress/favorites.
+    /// It invokes only BaseItem key/id accessors and never writes IUserDataManager or a database.
     /// </summary>
     public sealed class UserDataContractDiagnosticsApiService : BaseApiService
     {
@@ -58,7 +65,12 @@ namespace StrmAssistant.Api
 
         public object Get(GetUserDataContractDiagnostic request)
         {
-            var result = new UserDataContractDiagnosticResult { RequestedId = request?.Id };
+            var result = new UserDataContractDiagnosticResult
+            {
+                RequestedId = request?.Id,
+                IsolationEnabled = MultiVersionRuntimeSettings.GetSnapshot().IsolateUserDataPerVersion,
+                IsolationRuntimePatch = MultiVersionUserDataIsolationModState.Status
+            };
             var item = ResolveItem(request?.Id);
             if (item == null)
             {
@@ -85,7 +97,11 @@ namespace StrmAssistant.Api
                     .Where(value => !string.IsNullOrWhiteSpace(value))
                     .Distinct(StringComparer.OrdinalIgnoreCase).Count();
                 if (all.Count > 1 && distinctKeys <= 1)
-                    result.Warnings.Add("Merged versions appear to expose the same/limited UserData key set. Independent progress/favorites must not be enabled until the real IUserDataManager lookup path is verified.");
+                    result.Warnings.Add("Merged versions expose the same/limited original UserData key set. The optional isolation patch changes only the runtime key and does not migrate old shared data.");
+                if (result.IsolationEnabled && result.IsolationRuntimePatch?.Patched != true)
+                    result.Warnings.Add("Per-version UserData isolation is enabled, but the Video.GetUserDataKeyInternal runtime patch is not active.");
+                if (result.IsolationEnabled)
+                    result.Warnings.Add("This endpoint is read-only. Verify WouldUseIsolatedKey for primary and alternate items before testing progress/favorites.");
 
                 result.DiscoveredKeyMethods = result.DiscoveredKeyMethods
                     .Distinct(StringComparer.Ordinal).OrderBy(value => value).ToList();
@@ -103,16 +119,25 @@ namespace StrmAssistant.Api
         {
             var entry = new UserDataContractItem
             {
-                InternalId = item.InternalId.ToString(),
+                InternalId = item.InternalId.ToString(CultureInfo.InvariantCulture),
                 Name = item.Name,
                 Path = item.Path,
                 RuntimeType = item.GetType().FullName,
                 PresentationUniqueKey = ReadStringProperty(item, "PresentationUniqueKey")
             };
 
+            if (item is Video video && MultiVersionUserDataIsolationPatches.IsMergedVersion(video))
+            {
+                entry.WouldUseIsolatedKey = true;
+                entry.ProposedIsolatedKey = "strmassistant-version:" +
+                                            item.InternalId.ToString(CultureInfo.InvariantCulture);
+            }
+
             ReadKnownProperty(entry, item, "PresentationUniqueKey");
             ReadKnownProperty(entry, item, "UserDataKey");
             ReadKnownProperty(entry, item, "SeriesPresentationUniqueKey");
+            ReadKnownProperty(entry, item, "PrimaryVersionId");
+            ReadKnownProperty(entry, item, "IsSecondaryMergedItemInSameFolder");
             ReadKnownProperty(entry, item, "ProviderIds");
 
             foreach (var method in item.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
