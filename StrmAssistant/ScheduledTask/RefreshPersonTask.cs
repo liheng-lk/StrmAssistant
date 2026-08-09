@@ -70,22 +70,24 @@ namespace StrmAssistant.ScheduledTask
             var personItems = _libraryManager.GetItemList(personQuery).Cast<Person>().ToList();
             _logger.Info("RefreshPerson - Number of Persons Before: " + personItems.Count);
 
-            var dupPersonItems = personItems.Where(item => item.ProviderIds != null)
+            var duplicateCandidates = personItems.Where(item => item.ProviderIds != null)
                 .SelectMany(item => item.ProviderIds
-                    .Where(kvp => ProviderIdCheckKeys.Contains(kvp.Key))
+                    .Where(kvp => ProviderIdCheckKeys.Contains(kvp.Key) && !string.IsNullOrWhiteSpace(kvp.Value))
                     .Select(kvp => new { kvp.Key, kvp.Value, item }))
-                .GroupBy(kvp => new { kvp.Key, kvp.Value })
-                .Where(group => group.Count() > 1)
-                .SelectMany(group => group.Select(g => g.item))
-                .GroupBy(i => i.InternalId)
-                .Select(g => g.First())
+                .GroupBy(kvp => new { Key = kvp.Key.ToLowerInvariant(), Value = kvp.Value.ToLowerInvariant() })
+                .Where(group => group.Select(entry => entry.item.InternalId).Distinct().Count() > 1)
+                .SelectMany(group => group.Select(entry => entry.item))
+                .GroupBy(item => item.InternalId)
+                .Select(group => group.First())
                 .ToList();
+
+            var dupPersonItems = SelectDuplicatePersonsToDelete(duplicateCandidates);
 
             if (dupPersonItems.Count > 0)
             {
                 foreach (var dupItem in dupPersonItems)
                 {
-                    _logger.Info($"RefreshPerson - Duplicate Person: {dupItem.Name}");
+                    _logger.Info($"RefreshPerson - Duplicate Person planned for deletion: {dupItem.Name} ({dupItem.InternalId})");
                     var relatedItems = _libraryManager.GetItemList(new InternalItemsQuery
                     {
                         PersonIds = new[] { dupItem.InternalId },
@@ -99,20 +101,19 @@ namespace StrmAssistant.ScheduledTask
                             $"RefreshPerson - Deleting duplicate person {dupItem.Name} related to {relatedItem.Path}");
                     }
                 }
-                _libraryManager.DeleteItems(dupPersonItems.Select(i => i.InternalId).ToArray());
+                _libraryManager.DeleteItems(dupPersonItems.Select(item => item.InternalId).ToArray());
             }
             _logger.Info("RefreshPerson - Number of Duplicate Persons Deleted: " + dupPersonItems.Count);
 
-            var skipCount = personItems.Count(i => !i.HasProviderId(MetadataProviders.Tmdb));
+            var skipCount = personItems.Count(item => !item.HasProviderId(MetadataProviders.Tmdb));
             _logger.Info("RefreshPerson - Number of Persons without Tmdb Id Skipped: " + skipCount);
-
-            var remainingCount = personItems.Count - dupPersonItems.Count - skipCount;
-            _logger.Info("RefreshPerson - Number of Persons After: " + remainingCount);
 
             personItems.Clear();
             personItems.TrimExcess();
 
             personQuery.HasAnyProviderId = new[] { MetadataProviders.Tmdb.ToString() };
+            var remainingCount = _libraryManager.GetItemList(personQuery).Count;
+            _logger.Info("RefreshPerson - Number of Persons After: " + remainingCount);
 
             double total = remainingCount;
             var current = 0;
@@ -161,7 +162,7 @@ namespace StrmAssistant.ScheduledTask
                     if (metadataRefreshSkip && imageRefreshSkip)
                     {
                         var currentCount = Interlocked.Increment(ref current);
-                        progress.Report(currentCount / total * 100);
+                        progress.Report(total <= 0 ? 100 : currentCount / total * 100);
                         _logger.Info("RefreshPerson - Task " + currentCount + "/" + total + " Skipped - " +
                                      taskItem.Name);
                         continue;
@@ -247,7 +248,7 @@ namespace StrmAssistant.ScheduledTask
                             QueueManager.Tier2Semaphore.Release();
 
                             var currentCount = Interlocked.Increment(ref current);
-                            progress.Report(currentCount / total * 100);
+                            progress.Report(total <= 0 ? 100 : currentCount / total * 100);
                             _logger.Info("RefreshPerson - Task " + currentCount + "/" + total + " - " + taskItem.Name);
                         }
                     }, cancellationToken);
@@ -264,6 +265,97 @@ namespace StrmAssistant.ScheduledTask
 
             progress.Report(100.0);
             _logger.Info("RefreshPerson - Scheduled Task Complete");
+        }
+
+        private List<Person> SelectDuplicatePersonsToDelete(IReadOnlyCollection<Person> candidates)
+        {
+            var remaining = candidates?.ToDictionary(person => person.InternalId) ?? new Dictionary<long, Person>();
+            var toDelete = new List<Person>();
+
+            while (remaining.Count > 0)
+            {
+                var seed = remaining.Values.First();
+                var component = new List<Person>();
+                var queue = new Queue<Person>();
+                queue.Enqueue(seed);
+                remaining.Remove(seed.InternalId);
+
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    component.Add(current);
+                    var connected = remaining.Values.Where(person => SharesProviderId(current, person)).ToList();
+                    foreach (var person in connected)
+                    {
+                        remaining.Remove(person.InternalId);
+                        queue.Enqueue(person);
+                    }
+                }
+
+                if (component.Count <= 1) continue;
+
+                var ranked = component
+                    .Select(person => new
+                    {
+                        Person = person,
+                        RelatedCount = GetRelatedItemCount(person),
+                        HasPrimaryImage = person.HasImage(ImageType.Primary)
+                    })
+                    .OrderByDescending(entry => entry.RelatedCount)
+                    .ThenByDescending(entry => entry.HasPrimaryImage)
+                    .ThenBy(entry => entry.Person.InternalId)
+                    .ToList();
+
+                var keeper = ranked[0];
+                _logger.Info(
+                    "RefreshPerson - Duplicate group keeper: {0} ({1}), related={2}, image={3}",
+                    keeper.Person.Name, keeper.Person.InternalId, keeper.RelatedCount, keeper.HasPrimaryImage);
+
+                foreach (var duplicate in ranked.Skip(1))
+                {
+                    _logger.Info(
+                        "RefreshPerson - Duplicate group delete candidate: {0} ({1}), related={2}, image={3}",
+                        duplicate.Person.Name, duplicate.Person.InternalId, duplicate.RelatedCount,
+                        duplicate.HasPrimaryImage);
+                    toDelete.Add(duplicate.Person);
+                }
+            }
+
+            return toDelete.GroupBy(person => person.InternalId).Select(group => group.First()).ToList();
+        }
+
+        private int GetRelatedItemCount(Person person)
+        {
+            try
+            {
+                return _libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    PersonIds = new[] { person.InternalId },
+                    Recursive = true,
+                    IncludeItemTypes = new[]
+                    {
+                        nameof(Movie), nameof(Series), nameof(Season), nameof(Episode), nameof(Video), nameof(Trailer)
+                    }
+                }).Count;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static bool SharesProviderId(Person left, Person right)
+        {
+            if (left?.ProviderIds == null || right?.ProviderIds == null) return false;
+            foreach (var pair in left.ProviderIds)
+            {
+                if (!ProviderIdCheckKeys.Contains(pair.Key) || string.IsNullOrWhiteSpace(pair.Value)) continue;
+                if (right.ProviderIds.TryGetValue(pair.Key, out var otherValue) &&
+                    !string.IsNullOrWhiteSpace(otherValue) &&
+                    string.Equals(pair.Value, otherValue, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
         }
 
         public string Category => Resources.ResourceManager.GetString("PluginOptions_EditorTitle_Strm_Assistant",
