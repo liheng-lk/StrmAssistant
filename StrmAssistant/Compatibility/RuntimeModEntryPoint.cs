@@ -156,7 +156,9 @@ namespace StrmAssistant.Compatibility
                 status.CreateSearchTermTarget = target?.ToString();
                 if (target == null)
                 {
-                    Plugin.Instance?.Logger?.Warn("RuntimeModHost - SqliteItemRepository.CreateSearchTerm target not found; compatible Chinese search expansion disabled.");
+                    if (Plugin.Instance?.DebugMode == true)
+                        Plugin.Instance.Logger.Debug(
+                            "RuntimeModHost - legacy CreateSearchTerm(string) signature not found; late compatibility discovery will inspect alternate Emby signatures.");
                     return;
                 }
 
