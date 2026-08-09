@@ -1,6 +1,7 @@
 using MediaBrowser.Controller.Api;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Services;
+using StrmAssistant.Compatibility;
 using StrmAssistant.Experience;
 using System.Collections.Generic;
 
@@ -11,6 +12,7 @@ namespace StrmAssistant.Api
         public MultiVersionRuntimeOptions Options { get; set; }
         public string SettingsPath { get; set; }
         public MultiVersionDisplayCapabilityStatus RuntimePatch { get; set; }
+        public MultiVersionUserDataIsolationCapabilityStatus UserDataIsolationPatch { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
 
@@ -32,6 +34,7 @@ namespace StrmAssistant.Api
         public bool IncludeFileName { get; set; } = true;
         public bool IncludeContainer { get; set; }
         public string Separator { get; set; } = " · ";
+        public bool IsolateUserDataPerVersion { get; set; }
     }
 
     public sealed class MultiVersionEnhanceApiService : BaseApiService
@@ -50,7 +53,8 @@ namespace StrmAssistant.Api
                 SortHighestQualityFirst = request?.SortHighestQualityFirst == true,
                 IncludeFileName = request?.IncludeFileName != false,
                 IncludeContainer = request?.IncludeContainer == true,
-                Separator = request?.Separator
+                Separator = request?.Separator,
+                IsolateUserDataPerVersion = request?.IsolateUserDataPerVersion == true
             });
             return BuildStatus();
         }
@@ -61,13 +65,18 @@ namespace StrmAssistant.Api
             {
                 Options = MultiVersionRuntimeSettings.GetSnapshot(),
                 SettingsPath = MultiVersionRuntimeSettings.SettingsPath,
-                RuntimePatch = MultiVersionDisplayModState.Status
+                RuntimePatch = MultiVersionDisplayModState.Status,
+                UserDataIsolationPatch = MultiVersionUserDataIsolationModState.Status
             };
 
             if (status.Options.Enabled && status.RuntimePatch?.Patched != true)
                 status.Warnings.Add("Multi-version display enhancement is enabled but Video.GetMediaSources was not patched on this Emby build.");
             if (status.Options.SortHighestQualityFirst)
                 status.Warnings.Add("Quality sorting changes the returned media-source order and may change which version appears first/default in clients.");
+            if (status.Options.IsolateUserDataPerVersion && status.UserDataIsolationPatch?.Patched != true)
+                status.Warnings.Add("Per-version UserData isolation is enabled but Video.GetUserDataKeyInternal was not patched on this Emby build.");
+            if (status.Options.IsolateUserDataPerVersion)
+                status.Warnings.Add("Per-version UserData isolation uses new runtime keys and does not automatically migrate existing shared progress/favorites. Keep it disabled until final runtime contract testing is complete.");
             return status;
         }
     }
