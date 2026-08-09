@@ -2,7 +2,6 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.Querying;
 using System;
 using System.Linq;
 using System.Threading;
@@ -57,16 +56,14 @@ namespace StrmAssistant.Experience
                 {
                     IncludeItemTypes = new[] { nameof(Episode) },
                     ParentWithPresentationUniqueKeyFromItemId = series.InternalId,
-                    Recursive = true,
-                    OrderBy = new[]
-                    {
-                        (ItemSortBy.ParentIndexNumber, SortOrder.Ascending),
-                        (ItemSortBy.IndexNumber, SortOrder.Ascending)
-                    }
+                    Recursive = true
                 }).OfType<Episode>()
                     .Where(episode => episode.Series?.InternalId == series.InternalId &&
                                       episode.ParentIndexNumber.HasValue && episode.IndexNumber.HasValue &&
                                       IsEarlier(episode, current))
+                    .OrderBy(episode => episode.ParentIndexNumber.Value)
+                    .ThenBy(episode => episode.IndexNumber.Value)
+                    .ThenBy(episode => episode.InternalId)
                     .ToList();
 
                 var changed = 0;
