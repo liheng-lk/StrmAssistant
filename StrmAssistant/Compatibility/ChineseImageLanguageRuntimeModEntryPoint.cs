@@ -133,7 +133,7 @@ namespace StrmAssistant.Compatibility
                 if (item is MediaBrowser.Controller.Entities.TV.Season season) languageItem = season.Series;
                 else if (item is MediaBrowser.Controller.Entities.TV.Episode episode) languageItem = episode.Series;
 
-                var originalLanguage = item is MediaBrowser.Controller.Entities.Movies.BoxSet boxSet
+                var originalLanguage = item is BoxSet boxSet
                     ? Plugin.MetadataApi?.GetCollectionOriginalLanguage(boxSet)
                     : LanguageUtility.GetLanguageByTitle(languageItem?.OriginalTitle);
 
