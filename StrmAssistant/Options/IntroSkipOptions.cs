@@ -25,6 +25,11 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(UnlockIntroSkip), SimpleCondition.IsTrue)]
         public int IntroDetectionFingerprintMinutes { get; set; } = 10;
 
+        [DisplayName("按媒体库覆盖声纹长度")]
+        [Description("可选，每行一条：媒体库名称或内部 ID = 分钟。例如 动画 = 6、电视剧 = 10。范围 2–20 分钟；未匹配的媒体库继续使用上面的全局值。")]
+        [VisibleCondition(nameof(UnlockIntroSkip), SimpleCondition.IsTrue)]
+        public string FingerprintDurationOverrides { get; set; } = string.Empty;
+
         [DisplayName("片头声纹使用分布式 ffmpeg（实验）")]
         [Description("默认关闭。开启后只为本插件创建的 AudioFingerprintManager 注入分布式 ffmpeg/rffmpeg 路径；不会修改 Emby 全局转码器。季级声纹匹配和片头标记仍使用 Emby 原生逻辑。")]
         [Required]
