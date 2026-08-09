@@ -12,6 +12,8 @@ namespace StrmAssistant.IntroSkip
         public double MinimumConfidence { get; set; } = 0.75;
         public bool AllowCreditsMarker { get; set; } = true;
         public bool OverwriteExistingMarkers { get; set; }
+        public bool AutoApplyOnItemAdded { get; set; }
+        public int AutoApplyDelaySeconds { get; set; } = 30;
     }
 
     public static class UnifiedIntroDbRuntimeSettings
@@ -47,7 +49,9 @@ namespace StrmAssistant.IntroSkip
                     "TimeoutSeconds=" + _options.TimeoutSeconds,
                     "MinimumConfidence=" + _options.MinimumConfidence.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     "AllowCreditsMarker=" + _options.AllowCreditsMarker,
-                    "OverwriteExistingMarkers=" + _options.OverwriteExistingMarkers
+                    "OverwriteExistingMarkers=" + _options.OverwriteExistingMarkers,
+                    "AutoApplyOnItemAdded=" + _options.AutoApplyOnItemAdded,
+                    "AutoApplyDelaySeconds=" + _options.AutoApplyDelaySeconds
                 });
                 return Clone(_options);
             }
@@ -86,6 +90,8 @@ namespace StrmAssistant.IntroSkip
                         case "MinimumConfidence": if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var confidence)) result.MinimumConfidence = confidence; break;
                         case "AllowCreditsMarker": result.AllowCreditsMarker = ParseBool(value, true); break;
                         case "OverwriteExistingMarkers": result.OverwriteExistingMarkers = ParseBool(value, false); break;
+                        case "AutoApplyOnItemAdded": result.AutoApplyOnItemAdded = ParseBool(value, false); break;
+                        case "AutoApplyDelaySeconds": if (int.TryParse(value, out var delay)) result.AutoApplyDelaySeconds = delay; break;
                     }
                 }
             }
@@ -106,7 +112,9 @@ namespace StrmAssistant.IntroSkip
                 TimeoutSeconds = Math.Max(3, Math.Min(value.TimeoutSeconds, 120)),
                 MinimumConfidence = Math.Max(0, Math.Min(value.MinimumConfidence, 1)),
                 AllowCreditsMarker = value.AllowCreditsMarker,
-                OverwriteExistingMarkers = value.OverwriteExistingMarkers
+                OverwriteExistingMarkers = value.OverwriteExistingMarkers,
+                AutoApplyOnItemAdded = value.AutoApplyOnItemAdded,
+                AutoApplyDelaySeconds = Math.Max(3, Math.Min(value.AutoApplyDelaySeconds, 300))
             };
         }
 
