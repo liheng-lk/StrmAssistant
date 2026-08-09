@@ -14,6 +14,7 @@ namespace StrmAssistant.Compatibility
         public bool TargetFound { get; set; }
         public bool Patched { get; set; }
         public bool ReflectionStaticMediaSourceAvailable { get; set; }
+        public int RuntimeStaticMediaSourceParameterCount { get; set; }
         public string RuntimeStaticMediaSourceTarget { get; set; }
         public bool LibraryMonitorIgnoreRuleApplied { get; set; }
         public string Target { get; set; }
@@ -80,6 +81,7 @@ namespace StrmAssistant.Compatibility
                 status.ReflectionStaticMediaSourceAvailable = runtimeMethod != null;
                 status.RuntimeStaticMediaSourceTarget = runtimeMethod?.ToString();
                 var parameterCount = runtimeMethod?.GetParameters().Length ?? 0;
+                status.RuntimeStaticMediaSourceParameterCount = parameterCount;
                 status.Patched = wrapper != null && runtimeMethod != null &&
                                  (parameterCount == 7 || parameterCount == 8 || parameterCount == 10);
                 status.LibraryMonitorIgnoreRuleApplied = TryApplyLibraryMonitorIgnoreRule(_libraryMonitor);
