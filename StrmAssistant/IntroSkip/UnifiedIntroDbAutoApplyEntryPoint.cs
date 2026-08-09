@@ -97,7 +97,7 @@ namespace StrmAssistant.IntroSkip
                         document.CreditsStartSeconds.Value, options.OverwriteExistingMarkers);
 
                 chapters = chapters
-                    .OrderBy(c => c.StartPositionTicks ?? 0)
+                    .OrderBy(c => c.StartPositionTicks)
                     .ThenBy(c => (int)c.MarkerType)
                     .ToList();
                 _itemRepository.SaveChapters(episode.Id, chapters);
