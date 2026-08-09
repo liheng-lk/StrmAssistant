@@ -281,12 +281,14 @@ namespace StrmAssistant.IntroSkip
             if (identity == null || !identity.SeasonNumber.HasValue || !identity.EpisodeNumber.HasValue)
                 return null;
 
-            var tmdbText = !string.IsNullOrWhiteSpace(identity.EpisodeTmdbId)
-                ? identity.EpisodeTmdbId
-                : identity.SeriesTmdbId;
-            var imdbText = !string.IsNullOrWhiteSpace(identity.EpisodeImdbId)
-                ? identity.EpisodeImdbId
-                : identity.SeriesImdbId;
+            // TheIntroDB TV lookups use the parent series external ID plus season/episode.
+            // Episode-level TMDB IDs return media-not-found for normal TV queries, so only use them as a fallback.
+            var tmdbText = !string.IsNullOrWhiteSpace(identity.SeriesTmdbId)
+                ? identity.SeriesTmdbId
+                : identity.EpisodeTmdbId;
+            var imdbText = !string.IsNullOrWhiteSpace(identity.SeriesImdbId)
+                ? identity.SeriesImdbId
+                : identity.EpisodeImdbId;
             var hasTmdb = long.TryParse(tmdbText, out var tmdbId) && tmdbId > 0;
             var hasImdb = !string.IsNullOrWhiteSpace(imdbText);
             if (!hasTmdb && !hasImdb) return null;
@@ -329,7 +331,7 @@ namespace StrmAssistant.IntroSkip
                     Source = Name + " " + apiVersion,
                     ExternalId = response.tmdb_id > 0 ? response.tmdb_id.ToString() :
                         (!string.IsNullOrWhiteSpace(response.imdb_id) ? response.imdb_id :
-                            (identity.EpisodeTmdbId ?? identity.SeriesTmdbId ?? identity.EpisodeImdbId ?? identity.SeriesImdbId))
+                            (identity.SeriesTmdbId ?? identity.EpisodeTmdbId ?? identity.SeriesImdbId ?? identity.EpisodeImdbId))
                 };
                 Apply(result, intro, "intro");
                 Apply(result, recap, "recap");
