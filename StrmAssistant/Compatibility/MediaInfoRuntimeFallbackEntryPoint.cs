@@ -1,15 +1,11 @@
-using HarmonyLib;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Configuration;
-using MediaBrowser.Model.Dto;
 using StrmAssistant.Common;
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Threading;
 
 namespace StrmAssistant.Compatibility
 {
@@ -31,16 +27,13 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// Compatibility guard for Emby builds where IMediaSourceManager.GetStaticMediaSources
-    /// changed its runtime signature. The fallback mirrors the tested Emby 4.10 compatibility
-    /// strategy used by ODJ0930/StrmAssistant: discover the longest compatible overload and
-    /// build its argument list according to the runtime parameter count.
+    /// Read-only capability probe plus LibraryMonitor ignore-rule compatibility. MediaInfoApi
+    /// itself now discovers Emby's 7/8/10-parameter GetStaticMediaSources overload and invokes
+    /// the matching signature directly, so no Harmony patch is required here.
     /// </summary>
     public sealed class MediaInfoRuntimeFallbackEntryPoint : IServerEntryPoint
     {
-        private const string HarmonyId = "liheng-lk.strmassistantcustom.mediainfo-fallback";
         private readonly ILibraryMonitor _libraryMonitor;
-        private Harmony _harmony;
 
         public MediaInfoRuntimeFallbackEntryPoint(ILibraryMonitor libraryMonitor)
         {
@@ -54,31 +47,24 @@ namespace StrmAssistant.Compatibility
 
             try
             {
-                var target = typeof(MediaInfoApi).GetMethod(
+                var wrapper = typeof(MediaInfoApi).GetMethod(
                     "GetStaticMediaSources",
                     BindingFlags.Instance | BindingFlags.Public,
                     null,
                     new[] { typeof(BaseItem), typeof(bool) },
                     null);
-
-                status.TargetFound = target != null;
-                status.Target = target?.ToString();
-                if (target == null)
-                {
-                    status.Error = "MediaInfoApi.GetStaticMediaSources(BaseItem,bool) was not found.";
-                    return;
-                }
+                status.TargetFound = wrapper != null;
+                status.Target = wrapper?.ToString();
 
                 var reflectedField = typeof(MediaInfoApi).GetField(
                     "_getStaticMediaSources",
                     BindingFlags.Instance | BindingFlags.NonPublic);
-                status.ReflectionStaticMediaSourceAvailable =
-                    reflectedField?.GetValue(Plugin.MediaInfoApi) is MethodInfo;
+                var runtimeMethod = reflectedField?.GetValue(Plugin.MediaInfoApi) as MethodInfo;
 
-                if (!status.ReflectionStaticMediaSourceAvailable)
+                if (runtimeMethod == null)
                 {
-                    var mediaSourceManager = GetPrivateField<IMediaSourceManager>(Plugin.MediaInfoApi, "_mediaSourceManager");
-                    MediaInfoRuntimeFallbackPatches.RuntimeStaticMediaSources = mediaSourceManager?.GetType()
+                    var manager = GetPrivateField<IMediaSourceManager>(Plugin.MediaInfoApi, "_mediaSourceManager");
+                    runtimeMethod = manager?.GetType()
                         .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                         .Where(method => string.Equals(method.Name, "GetStaticMediaSources", StringComparison.Ordinal))
                         .OrderByDescending(method => method.GetParameters().Length)
@@ -89,30 +75,34 @@ namespace StrmAssistant.Compatibility
                                    parameters[0].ParameterType == typeof(BaseItem) &&
                                    parameters.Any(parameter => parameter.ParameterType == typeof(LibraryOptions));
                         });
-
-                    status.RuntimeStaticMediaSourceTarget =
-                        MediaInfoRuntimeFallbackPatches.RuntimeStaticMediaSources?.ToString();
                 }
 
+                status.ReflectionStaticMediaSourceAvailable = runtimeMethod != null;
+                status.RuntimeStaticMediaSourceTarget = runtimeMethod?.ToString();
+                var parameterCount = runtimeMethod?.GetParameters().Length ?? 0;
+                status.Patched = wrapper != null && runtimeMethod != null &&
+                                 (parameterCount == 7 || parameterCount == 8 || parameterCount == 10);
                 status.LibraryMonitorIgnoreRuleApplied = TryApplyLibraryMonitorIgnoreRule(_libraryMonitor);
 
-                _harmony = new Harmony(HarmonyId);
-                var prefix = typeof(MediaInfoRuntimeFallbackPatches).GetMethod(
-                    nameof(MediaInfoRuntimeFallbackPatches.GetStaticMediaSourcesPrefix),
-                    BindingFlags.Static | BindingFlags.Public);
-                _harmony.Patch(target, prefix: new HarmonyMethod(prefix));
-                status.Patched = true;
+                if (!status.TargetFound)
+                    status.Error = "MediaInfoApi.GetStaticMediaSources(BaseItem,bool) was not found.";
+                else if (!status.ReflectionStaticMediaSourceAvailable)
+                    status.Error = "No compatible Emby GetStaticMediaSources overload was found.";
+                else if (!status.Patched)
+                    status.Error = "Unsupported Emby GetStaticMediaSources parameter count: " + parameterCount;
+                else if (Plugin.Instance?.DebugMode == true)
+                    Plugin.Instance.Logger.Debug(
+                        "MediaInfo native compatibility active: GetStaticMediaSources args={0}", parameterCount);
             }
             catch (Exception ex)
             {
                 status.Error = ex.GetType().Name + ": " + ex.Message;
-                Plugin.Instance?.Logger?.Warn("MediaInfo runtime fallback unavailable: " + status.Error);
+                Plugin.Instance?.Logger?.Warn("MediaInfo 4.10 capability probe failed: " + status.Error);
             }
         }
 
         public void Dispose()
         {
-            try { _harmony?.UnpatchAll(HarmonyId); } catch { }
         }
 
         private static T GetPrivateField<T>(object target, string fieldName) where T : class
@@ -133,7 +123,8 @@ namespace StrmAssistant.Compatibility
                 if (TryAppendStringArrayField(monitorType, libraryMonitor, "_alwaysIgnoreExtensions", ".json"))
                     return true;
 
-                return TryAppendStringArrayField(monitorType, libraryMonitor, "_alwaysIgnoreSubstrings", "-mediainfo.json");
+                return TryAppendStringArrayField(monitorType, libraryMonitor,
+                    "_alwaysIgnoreSubstrings", "-mediainfo.json");
             }
             catch
             {
@@ -160,100 +151,9 @@ namespace StrmAssistant.Compatibility
             catch
             {
                 return AppDomain.CurrentDomain.GetAssemblies()
-                    .FirstOrDefault(assembly => string.Equals(assembly.GetName().Name, name, StringComparison.Ordinal));
+                    .FirstOrDefault(assembly =>
+                        string.Equals(assembly.GetName().Name, name, StringComparison.OrdinalIgnoreCase));
             }
-        }
-    }
-
-    public static class MediaInfoRuntimeFallbackPatches
-    {
-        internal static MethodInfo RuntimeStaticMediaSources { get; set; }
-
-        public static bool GetStaticMediaSourcesPrefix(MediaInfoApi __instance, BaseItem item,
-            bool enableAlternateMediaSources, ref List<MediaSourceInfo> __result)
-        {
-            try
-            {
-                if (__instance == null || item == null)
-                {
-                    __result = new List<MediaSourceInfo>();
-                    return false;
-                }
-
-                var originalReflectedField = typeof(MediaInfoApi).GetField(
-                    "_getStaticMediaSources",
-                    BindingFlags.Instance | BindingFlags.NonPublic);
-                if (originalReflectedField?.GetValue(__instance) is MethodInfo)
-                    return true;
-
-                var mediaSourceManager = GetPrivateField<IMediaSourceManager>(__instance, "_mediaSourceManager");
-                var libraryManager = GetPrivateField<ILibraryManager>(__instance, "_libraryManager");
-                var method = RuntimeStaticMediaSources;
-
-                if (mediaSourceManager == null || libraryManager == null || method == null)
-                {
-                    Plugin.Instance?.Logger?.Warn("MediaInfo runtime fallback could not resolve the Emby 4.10 GetStaticMediaSources overload.");
-                    __result = new List<MediaSourceInfo>();
-                    return false;
-                }
-
-                var parameters = method.GetParameters();
-                var libraryOptions = libraryManager.GetLibraryOptions(item);
-                var collectionFolders = (BaseItem[])libraryManager.GetCollectionFolders(item);
-                object[] args;
-
-                switch (parameters.Length)
-                {
-                    case 10:
-                        args = new object[]
-                        {
-                            item, enableAlternateMediaSources, false, true, true, collectionFolders,
-                            libraryOptions, null, null, CancellationToken.None
-                        };
-                        break;
-                    case 8:
-                        args = new object[]
-                        {
-                            item, enableAlternateMediaSources, false, true, collectionFolders,
-                            libraryOptions, null, null
-                        };
-                        break;
-                    case 7:
-                        args = new object[]
-                        {
-                            item, enableAlternateMediaSources, false, true, libraryOptions, null, null
-                        };
-                        break;
-                    default:
-                        Plugin.Instance?.Logger?.Warn("MediaInfo runtime fallback found an unsupported GetStaticMediaSources signature: " + method);
-                        __result = new List<MediaSourceInfo>();
-                        return false;
-                }
-
-                var result = method.Invoke(mediaSourceManager, args);
-                if (result is List<MediaSourceInfo> list)
-                    __result = list;
-                else if (result is IEnumerable<MediaSourceInfo> enumerable)
-                    __result = enumerable.ToList();
-                else
-                    __result = new List<MediaSourceInfo>();
-
-                if (Plugin.Instance?.DebugMode == true)
-                    Plugin.Instance.Logger.Debug("MediaInfo runtime fallback used {0} for {1}", method, item.Path);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Plugin.Instance?.Logger?.Warn("MediaInfo runtime fallback failed: " + ex.Message);
-                __result = new List<MediaSourceInfo>();
-                return false;
-            }
-        }
-
-        private static T GetPrivateField<T>(object target, string fieldName) where T : class
-        {
-            return target?.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
-                ?.GetValue(target) as T;
         }
     }
 }
