@@ -40,7 +40,7 @@ namespace StrmAssistant.Options
         public bool EnableExternalAudioTrackScan { get; set; } = true;
 
         [DisplayName("ISO / BDMV 媒体探测（实验）")]
-        [Description("启用独立、只读的 ISO/BDMV ffprobe 探测。当前阶段不会覆盖 Emby 的媒体流或章节数据，建议先通过测试接口确认实际服务器上的 ffprobe 输出。")]
+        [Description("启用独立的 ISO/BDMV ffprobe 探测。先通过 Health/Test 接口确认实际服务器上的 ffprobe 输出，再考虑启用写回。")]
         [Required]
         public bool EnableOpticalMediaProbe { get; set; } = false;
 
@@ -54,6 +54,12 @@ namespace StrmAssistant.Options
         [Required, MinValue(10), MaxValue(600)]
         [VisibleCondition(nameof(EnableOpticalMediaProbe), SimpleCondition.IsTrue)]
         public int OpticalProbeTimeoutSeconds { get; set; } = 120;
+
+        [DisplayName("允许 ISO / BDMV 写回（实验）")]
+        [Description("默认关闭。开启后仍必须通过管理员 Apply 接口逐个项目 Confirm=true 才会写入媒体流、章节、时长/码率/分辨率；不会自动批量覆盖媒体库。")]
+        [Required]
+        [VisibleCondition(nameof(EnableOpticalMediaProbe), SimpleCondition.IsTrue)]
+        public bool EnableOpticalMediaWriteBack { get; set; } = false;
 
         [DisplayNameL("PluginOptions_EnableImageCapture_Enable_Image_Capture", typeof(Resources))]
         [DescriptionL("PluginOptions_EnableImageCapture_Perform_image_capture_for_videos_without_primary_image__Default_is_False_", typeof(Resources))]
