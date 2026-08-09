@@ -2,7 +2,6 @@ using MediaBrowser.Controller.Plugins;
 using System;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.Loader;
 
 namespace StrmAssistant.Compatibility
 {
@@ -23,7 +22,7 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// Emby 4.10 can load bundled provider assemblies into a load context where a later
+    /// Emby 4.10 can load bundled provider assemblies in a context where a later
     /// Assembly.Load(simpleName) from a plugin no longer resolves them. Reuse an already
     /// loaded MovieDb assembly instead of loading another copy or depending on its path.
     /// </summary>
@@ -44,7 +43,6 @@ namespace StrmAssistant.Compatibility
                 try { status.MovieDbLocation = movieDb?.Location; } catch { }
 
                 AppDomain.CurrentDomain.AssemblyResolve += ResolveAppDomainAssembly;
-                AssemblyLoadContext.Default.Resolving += ResolveDefaultLoadContext;
                 _installed = true;
                 status.Installed = true;
             }
@@ -61,16 +59,6 @@ namespace StrmAssistant.Compatibility
             if (!string.Equals(requested, "MovieDb", StringComparison.OrdinalIgnoreCase)) return null;
 
             var assembly = FindLoaded(requested);
-            if (assembly != null)
-                AssemblyResolutionCompatibilityState.Status.ResolveHits++;
-            return assembly;
-        }
-
-        private static Assembly ResolveDefaultLoadContext(AssemblyLoadContext context, AssemblyName name)
-        {
-            if (!string.Equals(name?.Name, "MovieDb", StringComparison.OrdinalIgnoreCase)) return null;
-
-            var assembly = FindLoaded(name.Name);
             if (assembly != null)
                 AssemblyResolutionCompatibilityState.Status.ResolveHits++;
             return assembly;
@@ -99,7 +87,6 @@ namespace StrmAssistant.Compatibility
         {
             if (!_installed) return;
             try { AppDomain.CurrentDomain.AssemblyResolve -= ResolveAppDomainAssembly; } catch { }
-            try { AssemblyLoadContext.Default.Resolving -= ResolveDefaultLoadContext; } catch { }
             _installed = false;
         }
     }
