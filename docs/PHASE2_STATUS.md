@@ -77,10 +77,11 @@ Compile/package success is **not** treated as runtime verification. Features tha
 - [x] Successful capture is written through Emby's `IProviderManager.SaveImage` as the primary image.
 - [x] Temporary capture files are cleaned up best-effort.
 - [x] Distributed capture refuses to save if ffmpeg exits successfully but the generated image is not visible back on the Emby host.
+- [x] Aspect-ratio post-processing modes: preserve source ratio, centered 16:9 landscape crop, centered 2:3 portrait crop.
+- [x] Plan/command preview includes the effective ffmpeg crop filter.
 - [ ] Real local normal-video capture test.
 - [ ] Real Blu-ray ISO/BDMV capture test.
 - [ ] Real rffmpeg capture test proving output-file synchronization back to the Emby host.
-- [ ] Aspect-ratio post-processing presets.
 - [ ] Automatic/batch capture integration.
 
 ### Distributed chapter-image / BIF pre-generation
@@ -111,6 +112,7 @@ Compile/package success is **not** treated as runtime verification. Features tha
 - [x] Detect `bluray` and `smb` protocols.
 - [x] Detect chromaprint, Vulkan and libplacebo build flags.
 - [x] Optional active Vulkan + libplacebo ffmpeg smoke test.
+- [x] Optional active Chromaprint smoke test using one second of synthetic audio; no library media is touched.
 - [x] Detect common rffmpeg wrapper/backend log signatures.
 - [x] Read-only per-item distributed Probe endpoint.
 - [x] Probe confirms whether the configured wrapper/worker can open the exact media path and returns a stream/chapter summary.
@@ -132,15 +134,44 @@ Compile/package success is **not** treated as runtime verification. Features tha
 - [ ] Real rffmpeg worker routing test with a shared media path.
 - [ ] Real multi-worker load-balancing test.
 - [ ] Shared-path/permission diagnostics beyond an actual ffprobe Probe request.
-- [ ] Distributed fingerprint work through ffmpeg/chromaprint.
-- [ ] Central-server MediaInfo synchronization endpoint/workflow.
+
+### Fingerprint / Chromaprint diagnostics
+
+- [x] Admin-only `/StrmAssistant/Fingerprint/Health` endpoint.
+- [x] Read-only runtime inspection of the already-created `AudioFingerprintManager` binding.
+- [x] Reports manager type/assembly/version without taking a compile-time dependency on the private runtime type.
+- [x] Reports whether `CreateTitleFingerprint`, `GetAllFingerprintFilesForSeason`, `UpdateSequencesForSeason` and timeout patch bindings were resolved.
+- [x] Can run the active distributed/local Chromaprint synthetic-audio smoke test.
+- [x] Does not create fingerprint files, update sequences or modify intro markers.
+- [ ] Distributed fingerprint routing is intentionally disabled until the native runtime contract is verified on real Emby 4.8/4.9/4.10 installations.
+- [ ] Real rffmpeg Chromaprint smoke test.
+- [ ] Real native fingerprint runtime-binding comparison across Emby versions.
+
+### Shared-root MediaInfo synchronization
+
+- [x] Reuses the existing portable `-mediainfo.json` persistence format instead of introducing a second serialization format.
+- [x] Admin-only per-item Status endpoint.
+- [x] Admin-only per-item Export endpoint.
+- [x] Admin-only per-item Import endpoint.
+- [x] Sync requires a non-empty configured `MediaInfoJsonRootFolder` and an enabled persistence mode.
+- [x] Export does not overwrite an existing shared JSON by default.
+- [x] Export overwrite requires explicit `Overwrite=true` and `Confirm=true`.
+- [x] Import requires explicit `Confirm=true`.
+- [x] Safe import refuses to overwrite an item that already has MediaInfo.
+- [x] Safe import reuses existing file-change/stale-JSON validation.
+- [x] Existing JSON already strips MediaSource item IDs and absolute media paths and keeps chapters/marker state plus supported embedded music artwork.
+- [x] No cross-server database access or database writes are attempted; the transport layer is the configured shared/synchronized JSON root.
+- [ ] Real two-server shared-root Export/Import test.
+- [ ] Cross-host logical-path mapping when the two Emby servers mount the same library under different absolute roots.
+- [ ] Automated remote transport/replication; first stage expects NFS/SMB/Syncthing/other external synchronization of the JSON root.
+- [ ] Safe explicit overwrite/import workflow for destinations that already contain MediaInfo.
 
 ## Remaining Phase 2 work
 
-- [ ] Aspect-ratio post-processing for captured primary images.
 - [ ] Optical ISO/BDMV chapter-image/BIF integration.
-- [ ] Distributed fingerprint processing through compatible ffmpeg/chromaprint workers.
-- [ ] Central-server MediaInfo synchronization workflow.
+- [ ] Distributed fingerprint processing through compatible ffmpeg/chromaprint workers after runtime contract verification.
+- [ ] Cross-host MediaInfo sync key/path mapping and optional transport automation.
+- [ ] Automatic/batch custom image capture.
 - [ ] Additional music album/artist persistence behavior if runtime testing shows parent metadata is not restored by the current Audio lifecycle.
 
 ## Compile/package validation
@@ -157,8 +188,11 @@ The following compatibility milestones are green:
 - Run `31292091938` / #76 — cross-platform optical ffprobe path quoting hardening.
 - Run `31292295446` / #79 — custom/optical/distributed single-frame image capture and guarded primary-image save.
 - Run `31294376554` / #83 — distributed chapter JPEG pre-generation with native ThumbnailGenerator/BIF finalization.
+- Run `31294561881` / #86 — source/16:9/2:3 image-capture aspect-ratio post-processing.
+- Run `31294671106` / #90 — fingerprint runtime diagnostics plus active Chromaprint test support.
+- Run `31294847338` / #93 — safe shared-root MediaInfo Status/Export/Import after compatibility fix.
 
-Latest run #83 passed all matrix targets:
+Latest run #93 passed all matrix targets:
 
 - [x] Emby Core 4.8.0.80 compile/package/artifact.
 - [x] Emby Core 4.9.1.90 compile/package/artifact.
@@ -175,7 +209,7 @@ Latest run #83 passed all matrix targets:
 - [ ] Optical ffprobe Health on the target host.
 - [ ] Real Blu-ray ISO Probe, Plan and Apply test on disposable media.
 - [ ] Real multi-file BDMV BDInfo/MPLS Probe, Plan and Apply test.
-- [ ] Local custom ffmpeg ImageCapture Plan/Apply test.
+- [ ] Local custom ffmpeg ImageCapture Plan/Apply test, including Source/16:9/2:3 modes.
 - [ ] Blu-ray ISO/BDMV ImageCapture Plan/Apply test.
 - [ ] rffmpeg Health + status test.
 - [ ] Distributed Probe against a path visible with the same spelling on a worker.
@@ -183,4 +217,6 @@ Latest run #83 passed all matrix targets:
 - [ ] Distributed image capture only after output-file synchronization is confirmed.
 - [ ] Distributed chapter-image task with worker-visible media and `metadata/chapters` output path.
 - [ ] Confirm Emby native ThumbnailGenerator/BIF finalization after distributed chapter JPEG pre-generation.
+- [ ] `/Fingerprint/Health?RunChromaprintTest=true` on real local and rffmpeg executables.
+- [ ] Shared-root MediaInfo Status/Export/Import across two disposable Emby instances.
 - [ ] STRM distributed routing only after target-path parity is confirmed.
