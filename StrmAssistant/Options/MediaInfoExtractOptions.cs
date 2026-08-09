@@ -61,6 +61,32 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnableOpticalMediaProbe), SimpleCondition.IsTrue)]
         public bool EnableOpticalMediaWriteBack { get; set; } = false;
 
+        [DisplayName("分布式提取工具自检（实验）")]
+        [Description("启用自定义 ffprobe/ffmpeg 与 rffmpeg 的只读诊断设置。当前阶段不会自动替换 Emby 全局 ffmpeg 路径。")]
+        [Required]
+        public bool EnableDistributedExtractDiagnostics { get; set; } = false;
+
+        [DisplayName("分布式 ffprobe 路径")]
+        [Description("可填写 rffmpeg 的 ffprobe 软链接/包装器路径；留空使用 PATH 中的 ffprobe。")]
+        [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
+        public string DistributedFfprobeExecutablePath { get; set; } = string.Empty;
+
+        [DisplayName("分布式 ffmpeg 路径")]
+        [Description("可填写 rffmpeg 的 ffmpeg 软链接/包装器路径；留空使用 PATH 中的 ffmpeg。")]
+        [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
+        public string DistributedFfmpegExecutablePath { get; set; } = string.Empty;
+
+        [DisplayName("rffmpeg 可执行文件路径")]
+        [Description("可选。填写真实 rffmpeg 可执行文件后，自检接口会额外执行 `rffmpeg status` 返回节点状态。")]
+        [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
+        public string RffmpegExecutablePath { get; set; } = string.Empty;
+
+        [DisplayName("分布式工具自检超时（秒）")]
+        [Description("ffprobe、ffmpeg 或 rffmpeg status 单次自检超时。默认 30 秒。")]
+        [Required, MinValue(5), MaxValue(120)]
+        [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
+        public int DistributedToolTimeoutSeconds { get; set; } = 30;
+
         [DisplayNameL("PluginOptions_EnableImageCapture_Enable_Image_Capture", typeof(Resources))]
         [DescriptionL("PluginOptions_EnableImageCapture_Perform_image_capture_for_videos_without_primary_image__Default_is_False_", typeof(Resources))]
         [Browsable(false)]
