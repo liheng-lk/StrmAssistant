@@ -31,12 +31,23 @@ namespace StrmAssistant.Common
         private readonly IFileSystem _fileSystem;
         private readonly IItemRepository _itemRepository;
         private readonly ILogger _logger;
+        private readonly IApplicationPaths _applicationPaths;
+        private readonly IFfmpegManager _ffmpegManager;
+        private readonly IMediaEncoder _mediaEncoder;
+        private readonly IMediaMountManager _mediaMountManager;
+        private readonly IJsonSerializer _jsonSerializer;
+        private readonly IServerApplicationHost _serverApplicationHost;
 
         private readonly object _audioFingerprintManager;
+        private readonly ConstructorInfo _audioFingerprintManagerConstructor;
         private readonly MethodInfo _createTitleFingerprint;
         private readonly MethodInfo _getAllFingerprintFilesForSeason;
         private readonly MethodInfo _updateSequencesForSeason;
         private readonly FieldInfo _timeoutMs;
+
+        private readonly object _distributedManagerLock = new object();
+        private object _distributedAudioFingerprintManager;
+        private string _distributedFingerprintExecutable;
 
         public static List<string> LibraryPathsInScope;
 
@@ -49,6 +60,12 @@ namespace StrmAssistant.Common
             _libraryManager = libraryManager;
             _fileSystem = fileSystem;
             _itemRepository = itemRepository;
+            _applicationPaths = applicationPaths;
+            _ffmpegManager = ffmpegManager;
+            _mediaEncoder = mediaEncoder;
+            _mediaMountManager = mediaMountManager;
+            _jsonSerializer = jsonSerializer;
+            _serverApplicationHost = serverApplicationHost;
 
             UpdateLibraryPathsInScope();
 
@@ -56,7 +73,7 @@ namespace StrmAssistant.Common
             {
                 var embyProviders = Assembly.Load("Emby.Providers");
                 var audioFingerprintManager = embyProviders.GetType("Emby.Providers.Markers.AudioFingerprintManager");
-                var audioFingerprintManagerConstructor = audioFingerprintManager.GetConstructor(
+                _audioFingerprintManagerConstructor = audioFingerprintManager?.GetConstructor(
                     BindingFlags.Public | BindingFlags.Instance, null,
                     new[]
                     {
@@ -64,23 +81,23 @@ namespace StrmAssistant.Common
                         typeof(IMediaEncoder), typeof(IMediaMountManager), typeof(IJsonSerializer),
                         typeof(IServerApplicationHost)
                     }, null);
-                _audioFingerprintManager = audioFingerprintManagerConstructor?.Invoke(new object[]
+                _audioFingerprintManager = _audioFingerprintManagerConstructor?.Invoke(new object[]
                 {
                     fileSystem, _logger, applicationPaths, ffmpegManager, mediaEncoder, mediaMountManager,
                     jsonSerializer, serverApplicationHost
                 });
-                _createTitleFingerprint = audioFingerprintManager.GetMethod("CreateTitleFingerprint",
+                _createTitleFingerprint = audioFingerprintManager?.GetMethod("CreateTitleFingerprint",
                     BindingFlags.Public | BindingFlags.Instance, null,
                     new[]
                     {
                         typeof(Episode), typeof(LibraryOptions), typeof(IDirectoryService),
                         typeof(CancellationToken)
                     }, null);
-                _getAllFingerprintFilesForSeason = audioFingerprintManager.GetMethod("GetAllFingerprintFilesForSeason",
+                _getAllFingerprintFilesForSeason = audioFingerprintManager?.GetMethod("GetAllFingerprintFilesForSeason",
                     BindingFlags.Public | BindingFlags.Instance);
-                _updateSequencesForSeason = audioFingerprintManager.GetMethod("UpdateSequencesForSeason",
+                _updateSequencesForSeason = audioFingerprintManager?.GetMethod("UpdateSequencesForSeason",
                     BindingFlags.Public | BindingFlags.Instance);
-                _timeoutMs = audioFingerprintManager.GetField("TimeoutMs",
+                _timeoutMs = audioFingerprintManager?.GetField("TimeoutMs",
                     BindingFlags.NonPublic | BindingFlags.Instance);
                 PatchTimeout(Plugin.Instance.GetPluginOptions().GeneralOptions.MaxConcurrentCount);
             }
@@ -93,54 +110,248 @@ namespace StrmAssistant.Common
                 }
             }
 
-            if (_audioFingerprintManager is null || _createTitleFingerprint is null ||
-                _getAllFingerprintFilesForSeason is null || _updateSequencesForSeason is null || _timeoutMs is null)
+            if (_audioFingerprintManager is null || _audioFingerprintManagerConstructor is null ||
+                _createTitleFingerprint is null || _getAllFingerprintFilesForSeason is null ||
+                _updateSequencesForSeason is null || _timeoutMs is null)
             {
                 _logger.Warn($"{nameof(FingerprintApi)} Init Failed");
             }
         }
 
-        public Task<Tuple<string, bool>> CreateTitleFingerprint(Episode item, IDirectoryService directoryService,
-            CancellationToken cancellationToken)
+        public async Task<Tuple<string, bool>> CreateTitleFingerprint(Episode item,
+            IDirectoryService directoryService, CancellationToken cancellationToken)
         {
             if (MediaExtractionFilter.ShouldSkip(item, out var reason))
             {
                 _logger.Info("IntroFingerprintExtract - Skipped by extraction blacklist: {0} ({1})", item.Path,
                     reason);
-                return Task.FromResult(Tuple.Create(string.Empty, false));
+                return Tuple.Create(string.Empty, false);
             }
 
             var libraryOptions = _libraryManager.GetLibraryOptions(item);
+            var manager = SelectFingerprintManager(item, out var distributed);
+            if (manager == null)
+            {
+                _logger.Warn("IntroFingerprintExtract - No usable fingerprint manager for {0}", item.Path);
+                return Tuple.Create(string.Empty, false);
+            }
 
-            return (Task<Tuple<string, bool>>)_createTitleFingerprint.Invoke(_audioFingerprintManager,
-                new object[] { item, libraryOptions, directoryService, cancellationToken });
+            try
+            {
+                return await InvokeCreateTitleFingerprint(manager, item, libraryOptions, directoryService,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (distributed && ShouldFallbackToNative())
+            {
+                _logger.Warn("IntroFingerprintExtract - Distributed fingerprint failed for {0}; falling back to Emby native ffmpeg. {1}",
+                    item.Path, ex.Message);
+                return await InvokeCreateTitleFingerprint(_audioFingerprintManager, item, libraryOptions,
+                        directoryService, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
 
         public Task<Tuple<string, bool>> CreateTitleFingerprint(Episode item, CancellationToken cancellationToken)
         {
             var directoryService = new DirectoryService(_logger, _fileSystem);
-
             return CreateTitleFingerprint(item, directoryService, cancellationToken);
         }
 
-        private Task<object> GetAllFingerprintFilesForSeason(Season season, Episode[] episodes,
+        private Task<Tuple<string, bool>> InvokeCreateTitleFingerprint(object manager, Episode item,
             LibraryOptions libraryOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
-            return (Task<object>)_getAllFingerprintFilesForSeason.Invoke(_audioFingerprintManager,
-                new object[] { season, episodes, libraryOptions, directoryService, cancellationToken });
+            if (manager == null || _createTitleFingerprint == null)
+                return Task.FromResult(Tuple.Create(string.Empty, false));
+
+            try
+            {
+                return (Task<Tuple<string, bool>>)_createTitleFingerprint.Invoke(manager,
+                    new object[] { item, libraryOptions, directoryService, cancellationToken });
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                throw ex.InnerException;
+            }
         }
 
-        private void UpdateSequencesForSeason(Season season, object seasonFingerprintInfo, Episode episode,
-            LibraryOptions libraryOptions, IDirectoryService directoryService)
+        private Task<object> GetAllFingerprintFilesForSeason(object manager, Season season, Episode[] episodes,
+            LibraryOptions libraryOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
-            _updateSequencesForSeason.Invoke(_audioFingerprintManager,
-                new[] { season, seasonFingerprintInfo, episode, libraryOptions, directoryService });
+            try
+            {
+                return (Task<object>)_getAllFingerprintFilesForSeason.Invoke(manager,
+                    new object[] { season, episodes, libraryOptions, directoryService, cancellationToken });
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                throw ex.InnerException;
+            }
+        }
+
+        private void UpdateSequencesForSeason(object manager, Season season, object seasonFingerprintInfo,
+            Episode episode, LibraryOptions libraryOptions, IDirectoryService directoryService)
+        {
+            try
+            {
+                _updateSequencesForSeason.Invoke(manager,
+                    new[] { season, seasonFingerprintInfo, episode, libraryOptions, directoryService });
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                throw ex.InnerException;
+            }
         }
 
         public void PatchTimeout(int maxConcurrentCount)
         {
-            var newTimeout = maxConcurrentCount * Convert.ToInt32(TimeSpan.FromMinutes(10.0).TotalMilliseconds);
-            _timeoutMs.SetValue(_audioFingerprintManager, newTimeout);
+            var newTimeout = Math.Max(1, maxConcurrentCount) *
+                             Convert.ToInt32(TimeSpan.FromMinutes(10.0).TotalMilliseconds);
+            PatchTimeoutForManager(_audioFingerprintManager, newTimeout);
+
+            lock (_distributedManagerLock)
+            {
+                PatchTimeoutForManager(_distributedAudioFingerprintManager, newTimeout);
+            }
+        }
+
+        private void PatchTimeoutForManager(object manager, int timeoutMs)
+        {
+            if (manager == null || _timeoutMs == null) return;
+            try
+            {
+                _timeoutMs.SetValue(manager, timeoutMs);
+            }
+            catch (Exception ex)
+            {
+                if (Plugin.Instance.DebugMode)
+                    _logger.Debug("Fingerprint timeout patch failed: " + ex.Message);
+            }
+        }
+
+        private object SelectFingerprintManager(Episode item, out bool distributed)
+        {
+            distributed = false;
+            var introOptions = Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions;
+            if (introOptions?.EnableDistributedFingerprintRouting != true)
+                return _audioFingerprintManager;
+
+            if (item?.IsShortcut == true && introOptions.EnableDistributedFingerprintForStrm != true)
+            {
+                if (Plugin.Instance.DebugMode)
+                    _logger.Debug("IntroFingerprintExtract - STRM keeps native fingerprint route: " + item.Path);
+                return _audioFingerprintManager;
+            }
+
+            var executable = GetDistributedFingerprintExecutable();
+            if (string.IsNullOrWhiteSpace(executable))
+            {
+                _logger.Warn("IntroFingerprintExtract - Distributed fingerprint routing is enabled but no distributed ffmpeg path is configured.");
+                return introOptions.DistributedFingerprintFallbackToEmby ? _audioFingerprintManager : null;
+            }
+
+            try
+            {
+                var manager = GetOrCreateDistributedManager(executable);
+                distributed = manager != null;
+                if (manager != null) return manager;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("IntroFingerprintExtract - Unable to create distributed fingerprint manager: " + ex.Message);
+            }
+
+            return introOptions.DistributedFingerprintFallbackToEmby ? _audioFingerprintManager : null;
+        }
+
+        private object SelectFingerprintManager(IEnumerable<Episode> episodes, out bool distributed)
+        {
+            distributed = false;
+            var introOptions = Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions;
+            if (introOptions?.EnableDistributedFingerprintRouting != true)
+                return _audioFingerprintManager;
+
+            var episodeArray = episodes?.Where(e => e != null).ToArray() ?? Array.Empty<Episode>();
+            if (episodeArray.Any(e => e.IsShortcut) && introOptions.EnableDistributedFingerprintForStrm != true)
+            {
+                if (Plugin.Instance.DebugMode)
+                    _logger.Debug("IntroFingerprintExtract - Season contains STRM; keeping native fingerprint route.");
+                return _audioFingerprintManager;
+            }
+
+            var executable = GetDistributedFingerprintExecutable();
+            if (string.IsNullOrWhiteSpace(executable))
+            {
+                _logger.Warn("IntroFingerprintExtract - Distributed fingerprint routing is enabled but no distributed ffmpeg path is configured.");
+                return introOptions.DistributedFingerprintFallbackToEmby ? _audioFingerprintManager : null;
+            }
+
+            try
+            {
+                var manager = GetOrCreateDistributedManager(executable);
+                distributed = manager != null;
+                if (manager != null) return manager;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("IntroFingerprintExtract - Unable to create distributed fingerprint manager: " + ex.Message);
+            }
+
+            return introOptions.DistributedFingerprintFallbackToEmby ? _audioFingerprintManager : null;
+        }
+
+        private object GetOrCreateDistributedManager(string executable)
+        {
+            lock (_distributedManagerLock)
+            {
+                if (_distributedAudioFingerprintManager != null &&
+                    string.Equals(_distributedFingerprintExecutable, executable,
+                        StringComparison.OrdinalIgnoreCase))
+                    return _distributedAudioFingerprintManager;
+
+                if (_audioFingerprintManagerConstructor == null || _ffmpegManager == null || _mediaEncoder == null)
+                    return null;
+
+                var ffmpegProxy = DistributedFfmpegPathProxy.CreateManagerProxy(_ffmpegManager, executable);
+                var encoderProxy = DistributedFfmpegPathProxy.CreateMediaEncoderProxy(_mediaEncoder, ffmpegProxy,
+                    executable);
+
+                var manager = _audioFingerprintManagerConstructor.Invoke(new object[]
+                {
+                    _fileSystem, _logger, _applicationPaths, ffmpegProxy, encoderProxy, _mediaMountManager,
+                    _jsonSerializer, _serverApplicationHost
+                });
+
+                if (manager == null) return null;
+
+                var maxConcurrentCount = Plugin.Instance?.GetPluginOptions()?.GeneralOptions.MaxConcurrentCount ?? 1;
+                var newTimeout = Math.Max(1, maxConcurrentCount) *
+                                 Convert.ToInt32(TimeSpan.FromMinutes(10.0).TotalMilliseconds);
+                PatchTimeoutForManager(manager, newTimeout);
+
+                _distributedAudioFingerprintManager = manager;
+                _distributedFingerprintExecutable = executable;
+                _logger.Info("IntroFingerprintExtract - Isolated distributed fingerprint manager initialized: {0}",
+                    executable);
+                return manager;
+            }
+        }
+
+        private static string GetDistributedFingerprintExecutable()
+        {
+            var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
+            return string.IsNullOrWhiteSpace(options?.DistributedFfmpegExecutablePath)
+                ? null
+                : options.DistributedFfmpegExecutablePath.Trim().Trim('"');
+        }
+
+        private static bool ShouldFallbackToNative()
+        {
+            return Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions?.DistributedFingerprintFallbackToEmby != false;
         }
 
         public bool IsLibraryInScope(BaseItem item)
@@ -396,8 +607,41 @@ namespace StrmAssistant.Common
                     season.GetEpisodes(episodeQuery).Items.OfType<Episode>())
                 .ToList();
 
-            var seasonFingerprintInfo = await GetAllFingerprintFilesForSeason(season,
-                allEpisodes, libraryOptions, directoryService, cancellationToken).ConfigureAwait(false);
+            var manager = SelectFingerprintManager(allEpisodes, out var distributed);
+            if (manager == null)
+            {
+                _logger.Warn("IntroFingerprintExtract - No usable fingerprint manager for season {0}", season.Path);
+                progress?.Report(1.0);
+                return;
+            }
+
+            try
+            {
+                await UpdateIntroMarkerForSeasonWithManager(manager, season, allEpisodes, episodesWithoutMarkers,
+                        libraryOptions, directoryService, cancellationToken, progress)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (distributed && ShouldFallbackToNative())
+            {
+                _logger.Warn("IntroFingerprintExtract - Distributed season fingerprint workflow failed for {0}; restarting with Emby native ffmpeg. {1}",
+                    season.Path, ex.Message);
+                await UpdateIntroMarkerForSeasonWithManager(_audioFingerprintManager, season, allEpisodes,
+                        episodesWithoutMarkers, libraryOptions, directoryService, cancellationToken, progress)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        private async Task UpdateIntroMarkerForSeasonWithManager(object manager, Season season,
+            Episode[] allEpisodes, IList<Episode> episodesWithoutMarkers, LibraryOptions libraryOptions,
+            IDirectoryService directoryService, CancellationToken cancellationToken, IProgress<double>? progress)
+        {
+            var seasonFingerprintInfo = await GetAllFingerprintFilesForSeason(manager, season,
+                    allEpisodes, libraryOptions, directoryService, cancellationToken)
+                .ConfigureAwait(false);
 
             double total = episodesWithoutMarkers.Count;
             var index = 0;
@@ -405,7 +649,8 @@ namespace StrmAssistant.Common
             foreach (var episode in episodesWithoutMarkers)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                UpdateSequencesForSeason(season, seasonFingerprintInfo, episode, libraryOptions, directoryService);
+                UpdateSequencesForSeason(manager, season, seasonFingerprintInfo, episode, libraryOptions,
+                    directoryService);
 
                 index++;
                 progress?.Report(total == 0 ? 1.0 : index / total);
