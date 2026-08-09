@@ -30,6 +30,7 @@ namespace StrmAssistant.MediaEnhance
         public int? BluRayPlaylist { get; set; }
         public int PositionPercent { get; set; }
         public double SeekSeconds { get; set; }
+        public MediaInfoExtractOptions.ImageCaptureAspectRatioOption AspectRatioMode { get; set; }
         public bool HasExistingPrimaryImage { get; set; }
         public string CommandPreview { get; set; }
     }
@@ -75,6 +76,8 @@ namespace StrmAssistant.MediaEnhance
                 ItemId = item?.InternalId.ToString(),
                 ItemName = item?.Name,
                 InputPath = inputPath,
+                AspectRatioMode = options?.ImageCaptureAspectRatio ??
+                                  MediaInfoExtractOptions.ImageCaptureAspectRatioOption.Source,
                 HasExistingPrimaryImage = item?.HasImage(ImageType.Primary) == true
             };
 
@@ -272,9 +275,28 @@ namespace StrmAssistant.MediaEnhance
                 builder.Append("-playlist ").Append(plan.BluRayPlaylist.Value).Append(' ');
             builder.Append("-i ").Append(QuoteArgument(plan.InputPath)).Append(' ');
             builder.Append("-ss ").Append(plan.SeekSeconds.ToString("0.###", CultureInfo.InvariantCulture)).Append(' ');
-            builder.Append("-map 0:v:0 -an -sn -dn -frames:v 1 -q:v 2 -y ");
+            builder.Append("-map 0:v:0 -an -sn -dn ");
+
+            var filter = BuildAspectRatioFilter(plan.AspectRatioMode);
+            if (!string.IsNullOrWhiteSpace(filter))
+                builder.Append("-vf ").Append(QuoteArgument(filter)).Append(' ');
+
+            builder.Append("-frames:v 1 -q:v 2 -y ");
             builder.Append(QuoteArgument(outputPath));
             return builder.ToString();
+        }
+
+        private static string BuildAspectRatioFilter(MediaInfoExtractOptions.ImageCaptureAspectRatioOption mode)
+        {
+            switch (mode)
+            {
+                case MediaInfoExtractOptions.ImageCaptureAspectRatioOption.Landscape16x9:
+                    return "crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',setsar=1";
+                case MediaInfoExtractOptions.ImageCaptureAspectRatioOption.Portrait2x3:
+                    return "crop='min(iw,ih*2/3)':'min(ih,iw*3/2)',setsar=1";
+                default:
+                    return null;
+            }
         }
 
         private static string QuoteArgument(string value)
