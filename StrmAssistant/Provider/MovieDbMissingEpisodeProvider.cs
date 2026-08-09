@@ -70,7 +70,7 @@ namespace StrmAssistant.Provider
                     .SelectMany(group => group.episodes, (group, episode) => ToSearchResult(
                         episode.id,
                         episode.order + 1,
-                        group.order + 1,
+                        group.order,
                         episode.name,
                         episode.overview,
                         episode.air_date))
