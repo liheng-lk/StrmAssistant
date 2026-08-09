@@ -112,7 +112,7 @@ namespace StrmAssistant.ScheduledTask
             personItems.TrimExcess();
 
             personQuery.HasAnyProviderId = new[] { MetadataProviders.Tmdb.ToString() };
-            var remainingCount = _libraryManager.GetItemList(personQuery).Count;
+            var remainingCount = _libraryManager.GetItemList(personQuery).Count();
             _logger.Info("RefreshPerson - Number of Persons After: " + remainingCount);
 
             double total = remainingCount;
@@ -336,7 +336,7 @@ namespace StrmAssistant.ScheduledTask
                     {
                         nameof(Movie), nameof(Series), nameof(Season), nameof(Episode), nameof(Video), nameof(Trailer)
                     }
-                }).Count;
+                }).Count();
             }
             catch
             {
