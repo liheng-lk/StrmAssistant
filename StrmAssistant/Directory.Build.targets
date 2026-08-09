@@ -1,5 +1,0 @@
-<Project>
-  <ItemGroup>
-    <Compile Remove="Metadata\DoubanAssistBridge.cs" />
-  </ItemGroup>
-</Project>
