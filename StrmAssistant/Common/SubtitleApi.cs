@@ -3,6 +3,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
@@ -57,7 +58,16 @@ namespace StrmAssistant.Common
                 {
                     localizationManager, fileSystem, libraryManager
                 });
-                _getExternalSubtitleStreams = subtitleResolverType?.GetMethod("GetExternalSubtitleStreams");
+
+                // Emby 4.10 moved the subtitle resolver implementation onto the generic track
+                // resolver path. Prefer the legacy method when present, then fall back to
+                // GetExternalTracks as used by the 4.10-compatible community build.
+                _getExternalSubtitleStreams =
+                    subtitleResolverType?.GetMethod("GetExternalSubtitleStreams") ??
+                    subtitleResolverType?.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                        .Where(method => string.Equals(method.Name, "GetExternalTracks", StringComparison.Ordinal))
+                        .OrderByDescending(method => method.GetParameters().Length)
+                        .FirstOrDefault();
 
                 if (Plugin.Instance.ApplicationHost.ApplicationVersion >= ExternalAudioMinVersion)
                 {
@@ -72,9 +82,10 @@ namespace StrmAssistant.Common
                     });
 
                     var baseTrackResolverType = embyProviders.GetType("Emby.Providers.MediaInfo.BaseTrackResolver");
-                    _getExternalTracks = baseTrackResolverType?.GetMethods(BindingFlags.Instance | BindingFlags.Public)
-                        .FirstOrDefault(method => method.Name == "GetExternalTracks" &&
-                                                  method.GetParameters().Length == 6);
+                    _getExternalTracks = baseTrackResolverType?.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                        .Where(method => string.Equals(method.Name, "GetExternalTracks", StringComparison.Ordinal))
+                        .OrderByDescending(method => method.GetParameters().Length)
+                        .FirstOrDefault(method => method.GetParameters().Length >= 5);
                 }
 
                 var ffProbeSubtitleInfoType = embyProviders.GetType("Emby.Providers.MediaInfo.FFProbeSubtitleInfo");
@@ -117,11 +128,27 @@ namespace StrmAssistant.Common
         private List<MediaStream> GetExternalSubtitleStreams(BaseItem item, int startIndex,
             IDirectoryService directoryService, bool clearCache)
         {
+            if (_subtitleResolver == null || _getExternalSubtitleStreams == null)
+                return new List<MediaStream>();
+
             var namingOptions = _libraryManager.GetNamingOptions();
+            var parameters = _getExternalSubtitleStreams.GetParameters();
 
-            var result = _getExternalSubtitleStreams?.Invoke(_subtitleResolver,
-                new object[] { item, startIndex, directoryService, namingOptions, clearCache });
+            object[] args;
+            if (parameters.Any(parameter => parameter.ParameterType == typeof(LibraryOptions)))
+            {
+                args = new object[]
+                {
+                    item, startIndex, directoryService, _libraryManager.GetLibraryOptions(item), namingOptions,
+                    clearCache
+                };
+            }
+            else
+            {
+                args = new object[] { item, startIndex, directoryService, namingOptions, clearCache };
+            }
 
+            var result = _getExternalSubtitleStreams.Invoke(_subtitleResolver, args);
             if (result is List<MediaStream> list) return list;
             if (result is IEnumerable<MediaStream> enumerable) return enumerable.ToList();
             return new List<MediaStream>();
@@ -135,11 +162,24 @@ namespace StrmAssistant.Common
 
             try
             {
-                var libraryOptions = _libraryManager.GetLibraryOptions(item);
+                var parameters = _getExternalTracks.GetParameters();
                 var namingOptions = _libraryManager.GetNamingOptions();
-                var result = _getExternalTracks.Invoke(_audioTrackResolver,
-                    new object[] { item, startIndex, directoryService, libraryOptions, namingOptions, clearCache });
+                var libraryOptions = _libraryManager.GetLibraryOptions(item);
+                object[] args;
 
+                if (parameters.Any(parameter => parameter.ParameterType == typeof(LibraryOptions)))
+                {
+                    args = new object[]
+                    {
+                        item, startIndex, directoryService, libraryOptions, namingOptions, clearCache
+                    };
+                }
+                else
+                {
+                    args = new object[] { item, startIndex, directoryService, namingOptions, clearCache };
+                }
+
+                var result = _getExternalTracks.Invoke(_audioTrackResolver, args);
                 var streams = result as IEnumerable<MediaStream>;
                 if (streams == null) return new List<MediaStream>();
 
