@@ -107,7 +107,6 @@ namespace StrmAssistant.IntroSkip
             if (fromSegments?.IntroStartSeconds.HasValue == true && fromSegments.IntroEndSeconds.HasValue)
                 return fromSegments;
 
-            // The official legacy endpoint is intentionally kept as a compatibility fallback for intro-only data.
             json = await GetJsonAsync(BaseUrl + "/intro" + query, timeoutSeconds, cancellationToken)
                 .ConfigureAwait(false);
             var legacy = ParseLegacyIntro(json);
@@ -265,7 +264,11 @@ namespace StrmAssistant.IntroSkip
 
     internal sealed class TheIntroDbProvider : UnifiedIntroDbHttpProviderBase
     {
-        private const string Endpoint = "https://api.theintrodb.org/v2/media";
+        private const string V3Endpoint = "https://api.theintrodb.org/v3/media";
+        private const string V2Endpoint = "https://api.theintrodb.org/v2/media";
+        private static readonly SemaphoreSlim RateGate = new SemaphoreSlim(1, 1);
+        private static DateTime _lastRequestUtc = DateTime.MinValue;
+        private static readonly TimeSpan MinimumSpacing = TimeSpan.FromMilliseconds(350);
 
         public TheIntroDbProvider(IHttpClient httpClient, IJsonSerializer jsonSerializer)
             : base(httpClient, jsonSerializer) { }
@@ -275,17 +278,34 @@ namespace StrmAssistant.IntroSkip
         public override async Task<UnifiedIntroDbDocument> FetchAsync(UnifiedIntroDbIdentity identity,
             int timeoutSeconds, CancellationToken cancellationToken)
         {
-            if (identity == null || string.IsNullOrWhiteSpace(identity.SeriesTmdbId) ||
-                !identity.SeasonNumber.HasValue || !identity.EpisodeNumber.HasValue)
+            if (identity == null || !identity.SeasonNumber.HasValue || !identity.EpisodeNumber.HasValue)
                 return null;
-            if (!long.TryParse(identity.SeriesTmdbId, out var tmdbId) || tmdbId <= 0) return null;
 
-            var url = Endpoint + "?tmdb_id=" + tmdbId.ToString(System.Globalization.CultureInfo.InvariantCulture) +
-                      "&season=" + identity.SeasonNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) +
-                      "&episode=" + identity.EpisodeNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var json = await GetJsonAsync(url, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var hasTmdb = long.TryParse(identity.SeriesTmdbId, out var tmdbId) && tmdbId > 0;
+            var hasImdb = !string.IsNullOrWhiteSpace(identity.SeriesImdbId);
+            if (!hasTmdb && !hasImdb) return null;
+
+            var query = hasTmdb
+                ? "?tmdb_id=" + tmdbId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : "?imdb_id=" + Uri.EscapeDataString(identity.SeriesImdbId);
+            query += "&season=" + identity.SeasonNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                     "&episode=" + identity.EpisodeNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            await WaitForRateGateAsync(cancellationToken).ConfigureAwait(false);
+            var json = await GetJsonAsync(V3Endpoint + query, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var result = Parse(json, identity, "v3");
+            if (result != null) return result;
+
+            // v2 is retained only as a compatibility fallback while deployments migrate to v3.
+            if (!hasTmdb) return null;
+            await WaitForRateGateAsync(cancellationToken).ConfigureAwait(false);
+            json = await GetJsonAsync(V2Endpoint + query, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            return Parse(json, identity, "v2");
+        }
+
+        private UnifiedIntroDbDocument Parse(string json, UnifiedIntroDbIdentity identity, string apiVersion)
+        {
             if (string.IsNullOrWhiteSpace(json)) return null;
-
             try
             {
                 var response = JsonSerializer.DeserializeFromString<TheIntroDbResponse>(json);
@@ -294,10 +314,14 @@ namespace StrmAssistant.IntroSkip
                 var recap = Best(response.recap);
                 var credits = BestCredits(response.credits);
                 var preview = Best(response.preview);
+                if (intro == null && recap == null && credits == null && preview == null) return null;
+
                 var result = new UnifiedIntroDbDocument
                 {
-                    Source = Name,
-                    ExternalId = response.tmdb_id > 0 ? response.tmdb_id.ToString() : identity.SeriesTmdbId
+                    Source = Name + " " + apiVersion,
+                    ExternalId = response.tmdb_id > 0 ? response.tmdb_id.ToString() :
+                        (!string.IsNullOrWhiteSpace(response.imdb_id) ? response.imdb_id :
+                            (identity.SeriesTmdbId ?? identity.SeriesImdbId))
                 };
                 Apply(result, intro, "intro");
                 Apply(result, recap, "recap");
@@ -309,8 +333,24 @@ namespace StrmAssistant.IntroSkip
             catch (Exception ex)
             {
                 if (Plugin.Instance?.DebugMode == true)
-                    Plugin.Instance.Logger.Debug("TheIntroDB parse failed: " + ex.Message);
+                    Plugin.Instance.Logger.Debug("TheIntroDB " + apiVersion + " parse failed: " + ex.Message);
                 return null;
+            }
+        }
+
+        private static async Task WaitForRateGateAsync(CancellationToken cancellationToken)
+        {
+            await RateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var elapsed = DateTime.UtcNow - _lastRequestUtc;
+                if (elapsed < MinimumSpacing)
+                    await Task.Delay(MinimumSpacing - elapsed, cancellationToken).ConfigureAwait(false);
+                _lastRequestUtc = DateTime.UtcNow;
+            }
+            finally
+            {
+                RateGate.Release();
             }
         }
 
@@ -325,8 +365,6 @@ namespace StrmAssistant.IntroSkip
 
         private static TheIntroDbSegment BestCredits(IEnumerable<TheIntroDbSegment> items)
         {
-            // Credits can contain an early opening-credit segment and a late end-credit segment.
-            // Emby CreditsStart represents the end-credit marker, so prefer the latest valid start.
             return (items ?? Enumerable.Empty<TheIntroDbSegment>())
                 .Where(v => v != null && v.start_ms.HasValue)
                 .OrderByDescending(v => v.start_ms.Value)
@@ -369,6 +407,7 @@ namespace StrmAssistant.IntroSkip
         private sealed class TheIntroDbResponse
         {
             public long tmdb_id { get; set; }
+            public string imdb_id { get; set; }
             public string type { get; set; }
             public List<TheIntroDbSegment> intro { get; set; }
             public List<TheIntroDbSegment> recap { get; set; }
