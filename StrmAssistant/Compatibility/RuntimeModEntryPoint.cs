@@ -7,7 +7,6 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using StrmAssistant.Options;
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -155,12 +154,19 @@ namespace StrmAssistant.Compatibility
                 {
                     httpClientHandler.Proxy = proxy;
                     httpClientHandler.UseProxy = true;
+                    return;
                 }
-                else if (__result is SocketsHttpHandler socketsHttpHandler)
-                {
-                    socketsHttpHandler.Proxy = proxy;
-                    socketsHttpHandler.UseProxy = true;
-                }
+
+                // SocketsHttpHandler is not part of the netstandard2.1 compile surface used by the
+                // 4.8 target. Newer Emby builds may still return it, so configure equivalent public
+                // Proxy/UseProxy properties dynamically instead of introducing a hard type reference.
+                var handlerType = __result.GetType();
+                var proxyProperty = handlerType.GetProperty("Proxy", BindingFlags.Instance | BindingFlags.Public);
+                var useProxyProperty = handlerType.GetProperty("UseProxy", BindingFlags.Instance | BindingFlags.Public);
+                if (proxyProperty?.CanWrite == true && typeof(IWebProxy).IsAssignableFrom(proxyProperty.PropertyType))
+                    proxyProperty.SetValue(__result, proxy);
+                if (useProxyProperty?.CanWrite == true && useProxyProperty.PropertyType == typeof(bool))
+                    useProxyProperty.SetValue(__result, true);
             }
             catch (Exception ex)
             {
