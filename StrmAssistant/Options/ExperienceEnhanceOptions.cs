@@ -116,6 +116,11 @@ namespace StrmAssistant.Options
         [Required]
         public bool BeautifyMissingEpisodeMetadata { get; set; } = false;
 
+        [DisplayName("多段视频标题美化（实验）")]
+        [Description("AdditionalPart/分段视频在 DTO/UI 中显示为 Part 2 / 第 2 部分等，不修改文件名和数据库元数据。")]
+        [Required]
+        public bool BeautifyMultipartTitles { get; set; } = false;
+
         [DisplayNameL("GeneralOptions_MergeMultiVersion_Merge_Multiple_Versions", typeof(Resources))]
         [DescriptionL("GeneralOptions_MergeMultiVersion_Auto_merge_multiple_versions_if_in_the_same_folder_", typeof(Resources))]
         [Required]
