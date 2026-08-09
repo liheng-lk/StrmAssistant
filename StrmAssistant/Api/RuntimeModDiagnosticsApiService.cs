@@ -22,6 +22,7 @@ namespace StrmAssistant.Api
         public MultiVersionUserDataIsolationCapabilityStatus MultiVersionUserDataIsolation { get; set; }
         public MissingEpisodesCapabilityStatus MissingEpisodes { get; set; }
         public EpisodeDtoBeautifyCapabilityStatus EpisodeDtoBeautify { get; set; }
+        public EpisodeCountDtoCapabilityStatus EpisodeCountDto { get; set; }
         public ForcedUserPreferencesCapabilityStatus ForcedUserPreferences { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
@@ -50,6 +51,7 @@ namespace StrmAssistant.Api
                 MultiVersionUserDataIsolation = MultiVersionUserDataIsolationModState.Status,
                 MissingEpisodes = MissingEpisodesModState.Status,
                 EpisodeDtoBeautify = EpisodeDtoBeautifyModState.Status,
+                EpisodeCountDto = EpisodeCountDtoModState.Status,
                 ForcedUserPreferences = ForcedUserPreferencesModState.Status
             };
 
@@ -62,6 +64,11 @@ namespace StrmAssistant.Api
             if ((result.EpisodeDtoBeautify?.SingleTargetsPatched ?? 0) == 0 &&
                 (result.EpisodeDtoBeautify?.BatchTargetsPatched ?? 0) == 0)
                 result.Warnings.Add("Episode DTO beautification did not resolve a DtoService target on this runtime.");
+            if ((result.EpisodeCountDto?.TargetsPatched ?? 0) == 0)
+                result.Warnings.Add("Total-episode-count display did not resolve a DtoService target on this runtime.");
+            else if (result.EpisodeCountDto?.UserDataPropertyFound != true ||
+                     result.EpisodeCountDto?.UnplayedItemCountPropertyFound != true)
+                result.Warnings.Add("DtoService was patched, but BaseItemDto.UserData.UnplayedItemCount was not found on this runtime; total-count display will safely no-op.");
             if (result.ForcedUserPreferences?.LibraryOrderPatched != true)
                 result.Warnings.Add("Forced library order did not resolve UserViewManager.GetUserViews on this runtime.");
 
