@@ -21,6 +21,7 @@ namespace StrmAssistant.MediaEnhance
         public bool SupportsLibplacebo { get; set; }
         public bool UsesRffmpegBackend { get; set; }
         public bool? VulkanLibplaceboTestPassed { get; set; }
+        public bool? ChromaprintTestPassed { get; set; }
         public string Error { get; set; }
         public string DiagnosticOutput { get; set; }
     }
@@ -44,12 +45,18 @@ namespace StrmAssistant.MediaEnhance
 
     /// <summary>
     /// Read-only diagnostics for custom ffprobe/ffmpeg and rffmpeg wrappers.
-    /// It does not modify Emby's global encoder paths or route extraction work yet.
+    /// It never modifies Emby's global encoder paths.
     /// </summary>
     public sealed class DistributedExtractDiagnostics
     {
-        public async Task<DistributedExtractHealthResult> CheckAsync(MediaInfoExtractOptions options,
+        public Task<DistributedExtractHealthResult> CheckAsync(MediaInfoExtractOptions options,
             bool runVulkanTest, CancellationToken cancellationToken)
+        {
+            return CheckAsync(options, runVulkanTest, false, cancellationToken);
+        }
+
+        public async Task<DistributedExtractHealthResult> CheckAsync(MediaInfoExtractOptions options,
+            bool runVulkanTest, bool runChromaprintTest, CancellationToken cancellationToken)
         {
             options ??= new MediaInfoExtractOptions();
             var timeout = Math.Max(5, Math.Min(options.DistributedToolTimeoutSeconds, 120));
@@ -57,8 +64,9 @@ namespace StrmAssistant.MediaEnhance
             var ffprobePath = ResolveExecutable(options.DistributedFfprobeExecutablePath, "ffprobe");
             var ffmpegPath = ResolveExecutable(options.DistributedFfmpegExecutablePath, "ffmpeg");
 
-            var ffprobeTask = CheckToolAsync(ffprobePath, false, false, timeout, cancellationToken);
-            var ffmpegTask = CheckToolAsync(ffmpegPath, true, runVulkanTest, timeout, cancellationToken);
+            var ffprobeTask = CheckToolAsync(ffprobePath, false, false, false, timeout, cancellationToken);
+            var ffmpegTask = CheckToolAsync(ffmpegPath, true, runVulkanTest, runChromaprintTest, timeout,
+                cancellationToken);
             var rffmpegTask = CheckRffmpegAsync(options.RffmpegExecutablePath, timeout, cancellationToken);
 
             await Task.WhenAll(ffprobeTask, ffmpegTask, rffmpegTask).ConfigureAwait(false);
@@ -73,15 +81,17 @@ namespace StrmAssistant.MediaEnhance
         }
 
         private static async Task<MediaToolCapabilityResult> CheckToolAsync(string executable, bool isFfmpeg,
-            bool runVulkanTest, int timeoutSeconds, CancellationToken cancellationToken)
+            bool runVulkanTest, bool runChromaprintTest, int timeoutSeconds, CancellationToken cancellationToken)
         {
             var result = new MediaToolCapabilityResult { Executable = executable };
+            var diagnosticParts = new List<string>();
 
             try
             {
                 var version = await RunProcessAsync(executable, "-version", timeoutSeconds, cancellationToken)
                     .ConfigureAwait(false);
                 var combinedVersion = CombineOutput(version);
+                diagnosticParts.Add(combinedVersion);
                 result.Version = FirstVersionLine(combinedVersion);
                 result.SupportsChromaprint = Contains(combinedVersion, "--enable-chromaprint");
                 result.SupportsVulkan = Contains(combinedVersion, "--enable-vulkan");
@@ -91,7 +101,7 @@ namespace StrmAssistant.MediaEnhance
                 if (version.ExitCode != 0)
                 {
                     result.Error = BuildError(version);
-                    result.DiagnosticOutput = Truncate(combinedVersion, 12000);
+                    result.DiagnosticOutput = Truncate(string.Join(Environment.NewLine, diagnosticParts), 12000);
                     return result;
                 }
 
@@ -99,6 +109,7 @@ namespace StrmAssistant.MediaEnhance
                         cancellationToken)
                     .ConfigureAwait(false);
                 var protocolOutput = CombineOutput(protocols);
+                diagnosticParts.Add(protocolOutput);
                 result.SupportsBluray = HasProtocol(protocolOutput, "bluray");
                 result.SupportsSmb = HasProtocol(protocolOutput, "smb");
                 result.UsesRffmpegBackend |= LooksLikeRffmpeg(protocols.StandardOutput, protocols.StandardError);
@@ -106,8 +117,31 @@ namespace StrmAssistant.MediaEnhance
                 if (protocols.ExitCode != 0)
                 {
                     result.Error = BuildError(protocols);
-                    result.DiagnosticOutput = Truncate(combinedVersion + Environment.NewLine + protocolOutput, 12000);
+                    result.DiagnosticOutput = Truncate(string.Join(Environment.NewLine, diagnosticParts), 12000);
                     return result;
+                }
+
+                if (isFfmpeg && runChromaprintTest)
+                {
+                    // Active test: synthesize one second of audio and ask ffmpeg to emit a Chromaprint fingerprint.
+                    // This verifies the muxer/runtime path rather than trusting only the build configuration string.
+                    const string chromaprintArgs = "-hide_banner -loglevel error " +
+                                                   "-f lavfi -i sine=frequency=997:sample_rate=44100:duration=1 " +
+                                                   "-map 0:a:0 -ac 1 -ar 11025 -f chromaprint -";
+                    var chromaprint = await RunProcessAsync(executable, chromaprintArgs, timeoutSeconds,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    var chromaprintOutput = CombineOutput(chromaprint);
+                    diagnosticParts.Add("[chromaprint-test]" + Environment.NewLine + chromaprintOutput);
+                    result.ChromaprintTestPassed = chromaprint.ExitCode == 0 &&
+                                                   !string.IsNullOrWhiteSpace(chromaprint.StandardOutput);
+                    result.UsesRffmpegBackend |= LooksLikeRffmpeg(chromaprint.StandardOutput,
+                        chromaprint.StandardError);
+                    if (result.ChromaprintTestPassed == true) result.SupportsChromaprint = true;
+                    if (chromaprint.ExitCode != 0)
+                        result.Error = "Chromaprint capability test failed: " + BuildError(chromaprint);
+                    else if (result.ChromaprintTestPassed != true)
+                        result.Error = "Chromaprint capability test returned no fingerprint output.";
                 }
 
                 if (isFfmpeg && runVulkanTest)
@@ -117,19 +151,22 @@ namespace StrmAssistant.MediaEnhance
                                             "-vf libplacebo -f null -";
                     var test = await RunProcessAsync(executable, testArgs, timeoutSeconds, cancellationToken)
                         .ConfigureAwait(false);
+                    var testOutput = CombineOutput(test);
+                    diagnosticParts.Add("[vulkan-libplacebo-test]" + Environment.NewLine + testOutput);
                     result.VulkanLibplaceboTestPassed = test.ExitCode == 0;
                     result.UsesRffmpegBackend |= LooksLikeRffmpeg(test.StandardOutput, test.StandardError);
-                    if (test.ExitCode != 0)
+                    if (test.ExitCode != 0 && string.IsNullOrWhiteSpace(result.Error))
                         result.Error = "Vulkan/libplacebo capability test failed: " + BuildError(test);
                 }
 
                 result.Success = string.IsNullOrWhiteSpace(result.Error);
-                result.DiagnosticOutput = Truncate(combinedVersion + Environment.NewLine + protocolOutput, 12000);
+                result.DiagnosticOutput = Truncate(string.Join(Environment.NewLine, diagnosticParts), 12000);
                 return result;
             }
             catch (Exception ex)
             {
                 result.Error = ex.Message;
+                result.DiagnosticOutput = Truncate(string.Join(Environment.NewLine, diagnosticParts), 12000);
                 return result;
             }
         }
