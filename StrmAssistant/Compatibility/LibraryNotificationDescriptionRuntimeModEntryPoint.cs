@@ -28,12 +28,6 @@ namespace StrmAssistant.Compatibility
             new LibraryNotificationDescriptionCapabilityStatus();
     }
 
-    /// <summary>
-    /// Enhances Emby's native NewLibraryContent notification without changing recipients or
-    /// notification preferences. Episode notifications get SxxExx on the first description line.
-    /// In Catch-up mode, a notification for an item that is actually queued for screenshot /
-    /// embedded-image work can be deferred until the image work finishes (bounded timeout).
-    /// </summary>
     public sealed class LibraryNotificationDescriptionRuntimeModEntryPoint : IServerEntryPoint
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.library-notification-description";
@@ -98,15 +92,12 @@ namespace StrmAssistant.Compatibility
 
             try
             {
-                var plugin = Plugin.Instance;
-                var options = plugin?.GetPluginOptions()?.ExperienceEnhanceOptions;
+                var options = Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions;
                 if (options?.EnableNotificationEnhance != true || __args == null) return true;
 
                 var request = __args.OfType<NotificationRequest>().FirstOrDefault();
                 var relatedItem = __args.OfType<BaseItem>().FirstOrDefault();
-                if (request == null || relatedItem == null ||
-                    !string.Equals(request.NotificationType, "NewLibraryContent", StringComparison.OrdinalIgnoreCase))
-                    return true;
+                if (request == null || relatedItem == null || !IsNewLibraryContent(request)) return true;
 
                 EnhanceEpisodeDescription(request, relatedItem as Episode);
 
@@ -123,6 +114,29 @@ namespace StrmAssistant.Compatibility
             }
 
             return true;
+        }
+
+        private static bool IsNewLibraryContent(NotificationRequest request)
+        {
+            var eventId = ReadRequestString(request, "NotificationType") ??
+                          ReadRequestString(request, "EventId") ??
+                          ReadRequestString(request, "Type");
+            return string.Equals(eventId, "NewLibraryContent", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ReadRequestString(NotificationRequest request, string propertyName)
+        {
+            try
+            {
+                var property = request?.GetType().GetProperty(propertyName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var value = property?.CanRead == true ? property.GetValue(request) : null;
+                return Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static void EnhanceEpisodeDescription(NotificationRequest request, Episode episode)
@@ -144,8 +158,7 @@ namespace StrmAssistant.Compatibility
             try
             {
                 if (item == null || item.HasImage(ImageType.Primary)) return false;
-                var plugin = Plugin.Instance;
-                var pluginOptions = plugin?.GetPluginOptions();
+                var pluginOptions = Plugin.Instance?.GetPluginOptions();
                 var general = pluginOptions?.GeneralOptions;
                 var media = pluginOptions?.MediaInfoExtractOptions;
                 if (general?.CatchupMode != true || media?.EnableImageCapture != true) return false;
@@ -165,14 +178,13 @@ namespace StrmAssistant.Compatibility
             try
             {
                 if (item == null || item.HasImage(ImageType.Primary)) return false;
-                var plugin = Plugin.Instance;
-                var media = plugin?.GetPluginOptions()?.MediaInfoExtractOptions;
-                if (plugin?.LibraryApi == null || media?.EnableImageCapture != true) return false;
+                var media = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
+                if (Plugin.LibraryApi == null || media?.EnableImageCapture != true) return false;
 
-                var libraryManager = plugin.ApplicationHost.Resolve<ILibraryManager>();
+                var libraryManager = Plugin.Instance?.ApplicationHost?.Resolve<ILibraryManager>();
                 var options = libraryManager?.GetLibraryOptions(item);
-                if (options == null || !plugin.LibraryApi.ImageCaptureEnabled(item, options)) return false;
-                return plugin.LibraryApi.IsExtractNeeded(item, true);
+                if (options == null || !Plugin.LibraryApi.ImageCaptureEnabled(item, options)) return false;
+                return Plugin.LibraryApi.IsExtractNeeded(item, true);
             }
             catch
             {
