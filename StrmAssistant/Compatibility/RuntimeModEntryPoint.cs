@@ -5,8 +5,10 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using Microsoft.International.Converters.TraditionalChineseToSimplifiedConverter;
 using StrmAssistant.Options;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -24,6 +26,9 @@ namespace StrmAssistant.Compatibility
         public bool AttachPeopleTargetFound { get; set; }
         public bool AttachPeoplePatched { get; set; }
         public string AttachPeopleTarget { get; set; }
+        public bool CreateSearchTermTargetFound { get; set; }
+        public bool CreateSearchTermPatched { get; set; }
+        public string CreateSearchTermTarget { get; set; }
         public string Error { get; set; }
     }
 
@@ -32,10 +37,6 @@ namespace StrmAssistant.Compatibility
         public static RuntimeModCapabilityStatus Status { get; internal set; } = new RuntimeModCapabilityStatus();
     }
 
-    /// <summary>
-    /// Minimal isolated Harmony host. Patches are installed once and read live plugin options on every call,
-    /// so disabling a feature makes its postfix a no-op without repeated Patch/Unpatch cycles.
-    /// </summary>
     public sealed class RuntimeModEntryPoint : IServerEntryPoint
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.runtime-mods";
@@ -53,6 +54,7 @@ namespace StrmAssistant.Compatibility
 
                 PatchHttpHandler(status);
                 PatchAttachPeople(status);
+                PatchCreateSearchTerm(status);
             }
             catch (Exception ex)
             {
@@ -134,10 +136,50 @@ namespace StrmAssistant.Compatibility
                 Plugin.Instance?.Logger?.Warn("RuntimeModHost - people patch unavailable: " + ex.Message);
             }
         }
+
+        private void PatchCreateSearchTerm(RuntimeModCapabilityStatus status)
+        {
+            try
+            {
+                var assembly = Assembly.Load("Emby.Server.Implementations");
+                var type = assembly.GetType("Emby.Server.Implementations.Data.SqliteItemRepository");
+                var target = type?.GetMethods(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
+                    .Where(m => string.Equals(m.Name, "CreateSearchTerm", StringComparison.Ordinal) &&
+                                m.ReturnType == typeof(string))
+                    .FirstOrDefault(m =>
+                    {
+                        var parameters = m.GetParameters();
+                        return parameters.Length == 1 && parameters[0].ParameterType == typeof(string);
+                    });
+
+                status.CreateSearchTermTargetFound = target != null;
+                status.CreateSearchTermTarget = target?.ToString();
+                if (target == null)
+                {
+                    Plugin.Instance?.Logger?.Warn("RuntimeModHost - SqliteItemRepository.CreateSearchTerm target not found; compatible Chinese search expansion disabled.");
+                    return;
+                }
+
+                RuntimeModPatches.CreateSearchTermMethod = target;
+                var postfix = typeof(RuntimeModPatches).GetMethod(nameof(RuntimeModPatches.CreateSearchTermPostfix),
+                    BindingFlags.Static | BindingFlags.Public);
+                _harmony.Patch(target, postfix: new HarmonyMethod(postfix));
+                status.CreateSearchTermPatched = true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance?.Logger?.Warn("RuntimeModHost - Chinese search patch unavailable: " + ex.Message);
+            }
+        }
     }
 
     public static class RuntimeModPatches
     {
+        [ThreadStatic]
+        private static bool _buildingSearchAlternative;
+
+        internal static MethodInfo CreateSearchTermMethod { get; set; }
+
         public static void HttpHandlerPostfix(ref HttpMessageHandler __result)
         {
             try
@@ -157,9 +199,6 @@ namespace StrmAssistant.Compatibility
                     return;
                 }
 
-                // SocketsHttpHandler is not part of the netstandard2.1 compile surface used by the
-                // 4.8 target. Newer Emby builds may still return it, so configure equivalent public
-                // Proxy/UseProxy properties dynamically instead of introducing a hard type reference.
                 var handlerType = __result.GetType();
                 var proxyProperty = handlerType.GetProperty("Proxy", BindingFlags.Instance | BindingFlags.Public);
                 var useProxyProperty = handlerType.GetProperty("UseProxy", BindingFlags.Instance | BindingFlags.Public);
@@ -205,6 +244,70 @@ namespace StrmAssistant.Compatibility
             }
         }
 
+        public static void CreateSearchTermPostfix(object[] __args, ref string __result)
+        {
+            if (_buildingSearchAlternative || string.IsNullOrWhiteSpace(__result)) return;
+
+            try
+            {
+                var options = Plugin.Instance?.GetPluginOptions()?.GeneralOptions;
+                if (options?.EnableChineseSearchEnhance != true ||
+                    options.EnableSimplifiedTraditionalSearch != true || __args == null) return;
+
+                var input = __args.OfType<string>().FirstOrDefault();
+                if (!ContainsCjkIdeograph(input) || CreateSearchTermMethod == null) return;
+
+                var variants = new HashSet<string>(StringComparer.Ordinal)
+                {
+                    input
+                };
+
+                TryAddChineseVariant(variants, input, ChineseConversionDirection.TraditionalToSimplified);
+                TryAddChineseVariant(variants, input, ChineseConversionDirection.SimplifiedToTraditional);
+                if (variants.Count <= 1) return;
+
+                var searchTerms = new List<string> { __result };
+                foreach (var variant in variants.Where(v => !string.Equals(v, input, StringComparison.Ordinal)))
+                {
+                    try
+                    {
+                        _buildingSearchAlternative = true;
+                        var alternative = CreateSearchTermMethod.Invoke(null, new object[] { variant }) as string;
+                        if (!string.IsNullOrWhiteSpace(alternative) &&
+                            !searchTerms.Contains(alternative, StringComparer.Ordinal))
+                            searchTerms.Add(alternative);
+                    }
+                    finally
+                    {
+                        _buildingSearchAlternative = false;
+                    }
+                }
+
+                if (searchTerms.Count > 1)
+                    __result = string.Join(" OR ", searchTerms.Select(term => "(" + term + ")"));
+            }
+            catch (Exception ex)
+            {
+                _buildingSearchAlternative = false;
+                if (Plugin.Instance?.DebugMode == true)
+                    Plugin.Instance.Logger.Debug("Chinese search expansion skipped: " + ex.Message);
+            }
+        }
+
+        private static void TryAddChineseVariant(ISet<string> variants, string input,
+            ChineseConversionDirection direction)
+        {
+            try
+            {
+                var converted = ChineseConverter.Convert(input, direction);
+                if (!string.IsNullOrWhiteSpace(converted)) variants.Add(converted);
+            }
+            catch
+            {
+                // A failed conversion must never affect the original search term.
+            }
+        }
+
         private static bool ContainsCjkIdeograph(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return false;
@@ -219,10 +322,6 @@ namespace StrmAssistant.Compatibility
         }
     }
 
-    /// <summary>
-    /// IWebProxy supporting either global public-network routing or an explicit hostname whitelist.
-    /// Loopback, RFC1918, link-local and configured bypass/local-discovery hosts always stay direct.
-    /// </summary>
     public sealed class SelectiveWebProxy : IWebProxy
     {
         private readonly Uri _proxyUri;
