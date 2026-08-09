@@ -20,6 +20,28 @@ namespace StrmAssistant.Options
         [DisplayNameL("PluginOptions_MetadataEnhanceOptions_Metadata_Enhance", typeof(Resources))]
         public override string EditorTitle => Resources.PluginOptions_MetadataEnhanceOptions_Metadata_Enhance;
 
+        [DisplayName("TMDB 元数据回退语言（实验）")]
+        [Description("默认关闭。扩展 MovieDb 自身的元数据语言链，不替换 MovieDb provider；优先语言缺少标题/简介时，可继续尝试指定回退语言。目标接口不可用时自动保持原生行为。")]
+        [Required]
+        public bool EnableMovieDbFallbackLanguages { get; set; } = false;
+
+        [DisplayName("TMDB 回退语言顺序")]
+        [Description("逗号、分号或换行分隔，例如 zh-SG,zh-HK,zh-TW,ja-JP。配置项会插入英文回退之前，重复项自动忽略。")]
+        [VisibleCondition(nameof(EnableMovieDbFallbackLanguages), SimpleCondition.IsTrue)]
+        public string MovieDbFallbackLanguages { get; set; } = "zh-SG,zh-HK,zh-TW,ja-JP";
+
+        [DisplayName("仅中文首选语言启用 TMDB 回退")]
+        [Description("建议保持开启。只有媒体库首选元数据语言以 zh 开头时才扩展回退链，避免改变英文/日文媒体库原有抓取顺序。")]
+        [Required]
+        [VisibleCondition(nameof(EnableMovieDbFallbackLanguages), SimpleCondition.IsTrue)]
+        public bool MovieDbFallbackOnlyForChinese { get; set; } = true;
+
+        [DisplayName("TMDB 图片允许通用中文")]
+        [Description("当 MovieDb 图片语言参数已有 zh-CN/zh-HK/zh-TW 等中文区域语言时，额外加入通用 zh，提升没有精确区域标签的中文海报命中率。")]
+        [Required]
+        [VisibleCondition(nameof(EnableMovieDbFallbackLanguages), SimpleCondition.IsTrue)]
+        public bool IncludeGenericChineseImageLanguage { get; set; } = true;
+
         [DisplayName("拼音首字母排序")]
         [Description("中文标题按拼音首字母参与字母索引排序；只改变运行时 SortName 计算，不批量写数据库，也不会覆盖已锁定的 SortName。")]
         [Required]
@@ -58,8 +80,6 @@ namespace StrmAssistant.Options
         [Required, MinValue(1)]
         public int EpisodeRefreshLookBackDays { get; set; } = 365;
 
-        // Keep the original serialized/UI property name above while preserving the code-facing
-        // spelling already used by LibraryApi. This avoids breaking existing plugin options files.
         [Browsable(false)]
         public int EpisodeRefreshLookbackDays
         {
