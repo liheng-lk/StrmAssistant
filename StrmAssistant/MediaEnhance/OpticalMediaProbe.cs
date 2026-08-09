@@ -1,5 +1,4 @@
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Serialization;
 using StrmAssistant.Options;
 using System;
@@ -8,6 +7,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -80,9 +80,8 @@ namespace StrmAssistant.MediaEnhance
     }
 
     /// <summary>
-    /// Standalone optical-media probe. This is intentionally read-only: it never writes MediaStreams,
-    /// chapters or item metadata. The first runtime gate is proving that the selected ffprobe can open
-    /// the requested ISO/BDMV input and return stable JSON on the real Emby host.
+    /// Read-only optical-media probe. It deliberately does not persist MediaStreams,
+    /// chapters or BaseItem fields. Runtime probing is validated before write-back is enabled.
     /// </summary>
     public sealed class OpticalMediaProbe
     {
@@ -97,14 +96,20 @@ namespace StrmAssistant.MediaEnhance
         {
             if (item == null) return OpticalMediaKind.Unsupported;
 
-            if (item.VideoType == VideoType.BluRay)
+            // VideoType/IsoType are server-internal details in some Emby package generations.
+            // Read them opportunistically instead of binding the plugin assembly to those members.
+            var videoType = ReadPropertyName(item, "VideoType");
+            var isoType = ReadPropertyName(item, "IsoType");
+
+            if (string.Equals(videoType, "BluRay", StringComparison.OrdinalIgnoreCase))
                 return OpticalMediaKind.BluRayDirectory;
 
-            if (item.VideoType == VideoType.Iso)
+            if (string.Equals(videoType, "Iso", StringComparison.OrdinalIgnoreCase))
             {
-                if (item.IsoType == IsoType.BluRay) return OpticalMediaKind.BluRayIso;
-                if (item.IsoType == IsoType.Dvd) return OpticalMediaKind.DvdIso;
-                return OpticalMediaKind.GenericIso;
+                if (string.Equals(isoType, "BluRay", StringComparison.OrdinalIgnoreCase))
+                    return OpticalMediaKind.BluRayIso;
+                if (string.Equals(isoType, "Dvd", StringComparison.OrdinalIgnoreCase))
+                    return OpticalMediaKind.DvdIso;
             }
 
             var path = item.Path;
@@ -113,13 +118,25 @@ namespace StrmAssistant.MediaEnhance
             var extension = Path.GetExtension(path);
             if (string.Equals(extension, ".iso", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(extension, ".img", StringComparison.OrdinalIgnoreCase))
+            {
+                if (ContainsAny(path, "bluray", "blu-ray", "bdmv")) return OpticalMediaKind.BluRayIso;
+                if (ContainsAny(path, "dvd")) return OpticalMediaKind.DvdIso;
                 return OpticalMediaKind.GenericIso;
+            }
 
-            if (Directory.Exists(path) &&
-                (Directory.Exists(Path.Combine(path, "BDMV")) ||
-                 string.Equals(Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
-                     "BDMV", StringComparison.OrdinalIgnoreCase)))
+            var trimmed = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (string.Equals(Path.GetFileName(trimmed), "BDMV", StringComparison.OrdinalIgnoreCase))
                 return OpticalMediaKind.BluRayDirectory;
+
+            try
+            {
+                if (Directory.Exists(trimmed) && Directory.Exists(Path.Combine(trimmed, "BDMV")))
+                    return OpticalMediaKind.BluRayDirectory;
+            }
+            catch
+            {
+                // Remote/unmounted paths are allowed to fall through. The probe endpoint will report the error.
+            }
 
             return OpticalMediaKind.Unsupported;
         }
@@ -148,7 +165,6 @@ namespace StrmAssistant.MediaEnhance
                         cancellationToken)
                     .ConfigureAwait(false);
 
-                var versionLine = FirstNonEmptyLine(version.StandardOutput) ?? FirstNonEmptyLine(version.StandardError);
                 var protocolLines = (protocols.StandardOutput ?? string.Empty)
                     .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
                     .Select(line => line.Trim());
@@ -157,7 +173,7 @@ namespace StrmAssistant.MediaEnhance
                 {
                     Success = protocols.ExitCode == 0,
                     Executable = executable,
-                    Version = versionLine,
+                    Version = FirstNonEmptyLine(version.StandardOutput) ?? FirstNonEmptyLine(version.StandardError),
                     HasBlurayProtocol = protocolLines.Any(line =>
                         string.Equals(line, "bluray", StringComparison.OrdinalIgnoreCase)),
                     Error = protocols.ExitCode == 0 ? null : BuildProcessError(protocols)
@@ -205,7 +221,7 @@ namespace StrmAssistant.MediaEnhance
 
             if (kind == OpticalMediaKind.DvdIso)
             {
-                result.Error = "DVD ISO write/probe integration is not enabled in this phase; Blu-ray ISO/BDMV is the current target.";
+                result.Error = "DVD ISO integration is not enabled in this phase; Blu-ray ISO/BDMV is the current target.";
                 return result;
             }
 
@@ -216,7 +232,7 @@ namespace StrmAssistant.MediaEnhance
                 return result;
             }
 
-            if (kind == OpticalMediaKind.BluRayDirectory && !Directory.Exists(sourcePath))
+            if (kind == OpticalMediaKind.BluRayDirectory && IsLocalPath(sourcePath) && !Directory.Exists(sourcePath))
             {
                 result.Error = "Blu-ray directory does not exist: " + sourcePath;
                 return result;
@@ -229,13 +245,9 @@ namespace StrmAssistant.MediaEnhance
                 return result;
             }
 
-            // FFmpeg's libbluray protocol accepts a mounted Blu-ray directory and, when the linked
-            // libbluray/libudfread build supports it, a UDF Blu-ray image as well. Only known Blu-ray
-            // items are forced through bluray:. Unknown ISO images are probed as ordinary files first.
             var probeInput = kind == OpticalMediaKind.BluRayDirectory || kind == OpticalMediaKind.BluRayIso
                 ? "bluray:" + sourcePath
                 : sourcePath;
-
             result.ProbeInput = probeInput;
 
             var args = string.Join(" ", new[]
@@ -294,12 +306,8 @@ namespace StrmAssistant.MediaEnhance
                 result.FormatName = document.format?.format_name;
                 result.RunTimeTicks = SecondsToTicks(ParseDouble(document.format?.duration));
                 result.BitRate = ParseInt(document.format?.bit_rate);
-                result.Streams = (document.streams ?? new List<FfProbeStream>())
-                    .Select(ToStreamInfo)
-                    .ToList();
-                result.Chapters = (document.chapters ?? new List<FfProbeChapter>())
-                    .Select(ToChapterInfo)
-                    .ToList();
+                result.Streams = (document.streams ?? new List<FfProbeStream>()).Select(ToStreamInfo).ToList();
+                result.Chapters = (document.chapters ?? new List<FfProbeChapter>()).Select(ToChapterInfo).ToList();
                 result.Success = result.Streams.Count > 0 || result.Chapters.Count > 0 || result.RunTimeTicks.HasValue;
 
                 if (!result.Success)
@@ -311,6 +319,30 @@ namespace StrmAssistant.MediaEnhance
             }
 
             return result;
+        }
+
+        private static string ReadPropertyName(object target, string propertyName)
+        {
+            try
+            {
+                var property = target.GetType().GetProperty(propertyName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                return property?.GetValue(target)?.ToString();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool ContainsAny(string value, params string[] needles)
+        {
+            return needles.Any(needle => value.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static bool IsLocalPath(string path)
+        {
+            return !Uri.TryCreate(path, UriKind.Absolute, out var uri) || uri.IsFile;
         }
 
         private static string ResolveExecutable(MediaInfoExtractOptions options)
@@ -328,15 +360,12 @@ namespace StrmAssistant.MediaEnhance
         private static string ResolveDiscRoot(Video item, OpticalMediaKind kind)
         {
             var path = item.Path;
-            if (string.IsNullOrWhiteSpace(path)) return null;
-
-            if (kind != OpticalMediaKind.BluRayDirectory) return path;
+            if (string.IsNullOrWhiteSpace(path) || kind != OpticalMediaKind.BluRayDirectory) return path;
 
             var trimmed = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            if (string.Equals(Path.GetFileName(trimmed), "BDMV", StringComparison.OrdinalIgnoreCase))
-                return Path.GetDirectoryName(trimmed);
-
-            return trimmed;
+            return string.Equals(Path.GetFileName(trimmed), "BDMV", StringComparison.OrdinalIgnoreCase)
+                ? Path.GetDirectoryName(trimmed)
+                : trimmed;
         }
 
         private static OpticalProbeStreamInfo ToStreamInfo(FfProbeStream stream)
@@ -386,21 +415,16 @@ namespace StrmAssistant.MediaEnhance
                 Math.Abs(denominator) > double.Epsilon)
                 return (float)(numerator / denominator);
 
-            if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var direct))
-                return direct;
-
-            return null;
+            return float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var direct)
+                ? direct
+                : (float?)null;
         }
 
         private static int? ParseInt(string value)
         {
-            if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var result))
-                return result;
-
-            if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longResult))
-                return longResult > int.MaxValue ? int.MaxValue : longResult < int.MinValue ? int.MinValue : (int)longResult;
-
-            return null;
+            if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var result)) return result;
+            if (!long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longResult)) return null;
+            return longResult > int.MaxValue ? int.MaxValue : longResult < int.MinValue ? int.MinValue : (int)longResult;
         }
 
         private static double? ParseDouble(string value)
@@ -414,10 +438,8 @@ namespace StrmAssistant.MediaEnhance
         {
             if (!seconds.HasValue || seconds.Value < 0 || double.IsNaN(seconds.Value) || double.IsInfinity(seconds.Value))
                 return null;
-
             var ticks = seconds.Value * TimeSpan.TicksPerSecond;
-            if (ticks > long.MaxValue) return long.MaxValue;
-            return Convert.ToInt64(ticks);
+            return ticks > long.MaxValue ? long.MaxValue : Convert.ToInt64(ticks);
         }
 
         private static string FirstNonEmptyLine(string text)
@@ -438,8 +460,9 @@ namespace StrmAssistant.MediaEnhance
 
         private static string Truncate(string value, int maxLength)
         {
-            if (string.IsNullOrEmpty(value) || value.Length <= maxLength) return value;
-            return value.Substring(0, maxLength) + "…";
+            return string.IsNullOrEmpty(value) || value.Length <= maxLength
+                ? value
+                : value.Substring(0, maxLength) + "…";
         }
 
         private static string QuoteArgument(string value)
@@ -471,8 +494,7 @@ namespace StrmAssistant.MediaEnhance
             var exitTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             process.Exited += (_, __) => exitTcs.TrySetResult(true);
 
-            if (!process.Start())
-                throw new InvalidOperationException("Unable to start ffprobe process: " + executable);
+            if (!process.Start()) throw new InvalidOperationException("Unable to start ffprobe process: " + executable);
 
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
@@ -487,23 +509,20 @@ namespace StrmAssistant.MediaEnhance
                 }
                 catch
                 {
-                    // best effort cancellation only
+                    // best effort cancellation
                 }
 
-                exitTcs.TrySetCanceled(timeoutCts.Token);
+                exitTcs.TrySetCanceled();
             });
 
             if (process.HasExited) exitTcs.TrySetResult(true);
-
             await exitTcs.Task.ConfigureAwait(false);
-            var stdout = await stdoutTask.ConfigureAwait(false);
-            var stderr = await stderrTask.ConfigureAwait(false);
 
             return new ProcessResult
             {
                 ExitCode = process.ExitCode,
-                StandardOutput = stdout,
-                StandardError = stderr
+                StandardOutput = await stdoutTask.ConfigureAwait(false),
+                StandardError = await stderrTask.ConfigureAwait(false)
             };
         }
 
