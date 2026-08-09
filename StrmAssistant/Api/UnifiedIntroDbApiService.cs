@@ -28,7 +28,7 @@ namespace StrmAssistant.Api
         public string Name { get; set; }
     }
 
-    public sealed class UnifiedIntroDbPreviewResult
+    public class UnifiedIntroDbPreviewResult
     {
         public bool Success { get; set; }
         public string ItemId { get; set; }
