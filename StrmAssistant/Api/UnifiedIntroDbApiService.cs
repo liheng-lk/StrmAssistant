@@ -14,10 +14,19 @@ using System.Threading.Tasks;
 
 namespace StrmAssistant.Api
 {
+    public sealed class UnifiedIntroDbProviderStatus
+    {
+        public string Name { get; set; }
+        public bool Enabled { get; set; }
+        public string Endpoint { get; set; }
+        public string Identity { get; set; }
+    }
+
     public sealed class UnifiedIntroDbSettingsStatus
     {
         public UnifiedIntroDbOptions Options { get; set; }
         public string SettingsPath { get; set; }
+        public List<UnifiedIntroDbProviderStatus> Providers { get; set; } = new List<UnifiedIntroDbProviderStatus>();
         public List<string> Warnings { get; set; } = new List<string>();
     }
 
@@ -42,6 +51,7 @@ namespace StrmAssistant.Api
     public sealed class UnifiedIntroDbPlanResult : UnifiedIntroDbPreviewResult
     {
         public bool MeetsMinimumConfidence { get; set; }
+        public bool CreditsMeetsMinimumConfidence { get; set; }
         public bool ExistingIntroMarkers { get; set; }
         public bool ExistingCreditsMarker { get; set; }
         public bool OverwriteExistingMarkers { get; set; }
@@ -73,6 +83,11 @@ namespace StrmAssistant.Api
     public sealed class SaveUnifiedIntroDbSettings : IReturn<UnifiedIntroDbSettingsStatus>
     {
         public bool Enabled { get; set; }
+        public bool IntroDbAppEnabled { get; set; } = true;
+        public bool TheIntroDbEnabled { get; set; } = true;
+        public bool CustomProviderEnabled { get; set; } = true;
+        public string ProviderOrder { get; set; } = "IntroDbApp,TheIntroDb,Custom";
+        public int CacheMinutes { get; set; } = 60;
         public string EndpointTemplate { get; set; }
         public int TimeoutSeconds { get; set; } = 15;
         public double MinimumConfidence { get; set; } = 0.75;
@@ -87,6 +102,7 @@ namespace StrmAssistant.Api
     public sealed class GetUnifiedIntroDbPreview : IReturn<UnifiedIntroDbPreviewResult>
     {
         public string Id { get; set; }
+        public bool Refresh { get; set; }
     }
 
     [Route("/StrmAssistant/IntroDb/{Id}/Plan", "GET", Summary = "Plan Unified IntroDb marker changes without modifying chapters")]
@@ -95,6 +111,7 @@ namespace StrmAssistant.Api
     {
         public string Id { get; set; }
         public bool? OverwriteExistingMarkers { get; set; }
+        public bool Refresh { get; set; }
     }
 
     [Route("/StrmAssistant/IntroDb/{Id}/Apply", "POST", Summary = "Apply Unified IntroDb marker changes after explicit confirmation")]
@@ -104,6 +121,7 @@ namespace StrmAssistant.Api
         public string Id { get; set; }
         public bool Confirm { get; set; }
         public bool? OverwriteExistingMarkers { get; set; }
+        public bool Refresh { get; set; }
     }
 
     public sealed class UnifiedIntroDbApiService : BaseApiService
@@ -127,6 +145,11 @@ namespace StrmAssistant.Api
             UnifiedIntroDbRuntimeSettings.Save(new UnifiedIntroDbOptions
             {
                 Enabled = request?.Enabled == true,
+                IntroDbAppEnabled = request?.IntroDbAppEnabled != false,
+                TheIntroDbEnabled = request?.TheIntroDbEnabled != false,
+                CustomProviderEnabled = request?.CustomProviderEnabled != false,
+                ProviderOrder = request?.ProviderOrder,
+                CacheMinutes = request?.CacheMinutes ?? 60,
                 EndpointTemplate = request?.EndpointTemplate,
                 TimeoutSeconds = request?.TimeoutSeconds ?? 15,
                 MinimumConfidence = request?.MinimumConfidence ?? 0.75,
@@ -151,10 +174,11 @@ namespace StrmAssistant.Api
             result.ItemName = episode.Name;
             result.Identity = _bridge.ResolveIdentity(episode);
             result.ExistingMarkers = GetMarkerViews(episode);
-            result.Remote = await _bridge.FetchAsync(episode, CancellationToken.None).ConfigureAwait(false);
+            result.Remote = await _bridge.FetchAsync(episode, CancellationToken.None, request?.Refresh == true)
+                .ConfigureAwait(false);
             if (result.Remote == null)
             {
-                result.Error = "Unified IntroDb did not return a valid marker document.";
+                result.Error = "No enabled intro database provider returned a valid intro marker document.";
                 return result;
             }
 
@@ -165,7 +189,8 @@ namespace StrmAssistant.Api
         public async Task<object> Get(GetUnifiedIntroDbPlan request)
         {
             var episode = ResolveEpisode(request?.Id);
-            return await BuildPlanAsync(episode, request?.Id, request?.OverwriteExistingMarkers, CancellationToken.None)
+            return await BuildPlanAsync(episode, request?.Id, request?.OverwriteExistingMarkers,
+                    request?.Refresh == true, CancellationToken.None)
                 .ConfigureAwait(false);
         }
 
@@ -186,7 +211,8 @@ namespace StrmAssistant.Api
             }
 
             result.ItemName = episode.Name;
-            var plan = await BuildPlanAsync(episode, request.Id, request.OverwriteExistingMarkers, CancellationToken.None)
+            var plan = await BuildPlanAsync(episode, request.Id, request.OverwriteExistingMarkers,
+                    request.Refresh, CancellationToken.None)
                 .ConfigureAwait(false);
             if (!plan.CanApply)
             {
@@ -232,7 +258,7 @@ namespace StrmAssistant.Api
         }
 
         private async Task<UnifiedIntroDbPlanResult> BuildPlanAsync(Episode episode, string itemId,
-            bool? overwriteOverride, CancellationToken cancellationToken)
+            bool? overwriteOverride, bool refresh, CancellationToken cancellationToken)
         {
             var options = UnifiedIntroDbRuntimeSettings.GetSnapshot();
             var result = new UnifiedIntroDbPlanResult
@@ -252,24 +278,28 @@ namespace StrmAssistant.Api
             result.ExistingMarkers = GetMarkerViews(episode);
             result.ExistingIntroMarkers = result.ExistingMarkers.Any(m => m.MarkerType == MarkerType.IntroStart.ToString() || m.MarkerType == MarkerType.IntroEnd.ToString());
             result.ExistingCreditsMarker = result.ExistingMarkers.Any(m => m.MarkerType == MarkerType.CreditsStart.ToString());
-            result.Remote = await _bridge.FetchAsync(episode, cancellationToken).ConfigureAwait(false);
+            result.Remote = await _bridge.FetchAsync(episode, cancellationToken, refresh).ConfigureAwait(false);
             if (result.Remote == null)
             {
-                result.Error = "Unified IntroDb did not return a valid marker document.";
+                result.Error = "No enabled intro database provider returned a valid intro marker document.";
                 return result;
             }
 
             result.Success = true;
-            result.MeetsMinimumConfidence = !result.Remote.Confidence.HasValue || result.Remote.Confidence.Value >= options.MinimumConfidence;
+            var introConfidence = result.Remote.IntroConfidence ?? result.Remote.Confidence;
+            result.MeetsMinimumConfidence = !introConfidence.HasValue || introConfidence.Value >= options.MinimumConfidence;
+            result.CreditsMeetsMinimumConfidence = !result.Remote.CreditsConfidence.HasValue ||
+                                                   result.Remote.CreditsConfidence.Value >= options.MinimumConfidence;
             if (!result.MeetsMinimumConfidence)
             {
-                result.Error = "Remote marker confidence is below MinimumConfidence.";
+                result.Error = "Intro marker confidence is below MinimumConfidence.";
                 return result;
             }
 
             result.ProposedMarkers.Add(NewMarker(MarkerType.IntroStart, result.Remote.IntroStartSeconds.Value));
             result.ProposedMarkers.Add(NewMarker(MarkerType.IntroEnd, result.Remote.IntroEndSeconds.Value));
-            if (options.AllowCreditsMarker && result.Remote.CreditsStartSeconds.HasValue)
+            if (options.AllowCreditsMarker && result.Remote.CreditsStartSeconds.HasValue &&
+                result.CreditsMeetsMinimumConfidence)
                 result.ProposedMarkers.Add(NewMarker(MarkerType.CreditsStart, result.Remote.CreditsStartSeconds.Value));
 
             var existingMarkerTypes = new HashSet<string>(result.ExistingMarkers.Select(m => m.MarkerType), StringComparer.OrdinalIgnoreCase);
@@ -332,10 +362,38 @@ namespace StrmAssistant.Api
             var result = new UnifiedIntroDbSettingsStatus
             {
                 Options = options,
-                SettingsPath = UnifiedIntroDbRuntimeSettings.SettingsPath
+                SettingsPath = UnifiedIntroDbRuntimeSettings.SettingsPath,
+                Providers = new List<UnifiedIntroDbProviderStatus>
+                {
+                    new UnifiedIntroDbProviderStatus
+                    {
+                        Name = "IntroDB.app",
+                        Enabled = options.IntroDbAppEnabled,
+                        Endpoint = "https://api.introdb.app/segments (legacy /intro fallback)",
+                        Identity = "Series IMDb ID + season + episode"
+                    },
+                    new UnifiedIntroDbProviderStatus
+                    {
+                        Name = "TheIntroDB.org",
+                        Enabled = options.TheIntroDbEnabled,
+                        Endpoint = "https://api.theintrodb.org/v2/media",
+                        Identity = "Series TMDB ID + season + episode"
+                    },
+                    new UnifiedIntroDbProviderStatus
+                    {
+                        Name = "Custom",
+                        Enabled = options.CustomProviderEnabled,
+                        Endpoint = options.EndpointTemplate,
+                        Identity = "Configured template placeholders"
+                    }
+                }
             };
-            if (options.Enabled && string.IsNullOrWhiteSpace(options.EndpointTemplate))
-                result.Warnings.Add("Unified IntroDb is enabled but EndpointTemplate is empty.");
+            if (options.Enabled && !options.IntroDbAppEnabled && !options.TheIntroDbEnabled && !options.CustomProviderEnabled)
+                result.Warnings.Add("Unified IntroDb is enabled but all providers are disabled.");
+            if (options.Enabled && options.CustomProviderEnabled && string.IsNullOrWhiteSpace(options.EndpointTemplate))
+                result.Warnings.Add("Custom provider is enabled but EndpointTemplate is empty; built-in providers can still operate.");
+            if (options.Enabled && options.CacheMinutes == 0)
+                result.Warnings.Add("Provider caching is disabled. Public APIs will be queried on every Preview/Plan/auto-apply request.");
             if (options.Enabled && options.AutoApplyOnItemAdded)
                 result.Warnings.Add("Automatic marker write-back is enabled for newly added episodes. Existing markers are preserved unless OverwriteExistingMarkers is enabled.");
             return result;
