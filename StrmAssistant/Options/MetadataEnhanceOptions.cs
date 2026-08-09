@@ -18,7 +18,7 @@ namespace StrmAssistant.Options
     public class MetadataEnhanceOptions : EditableOptionsBase
     {
         [DisplayNameL("PluginOptions_MetadataEnhanceOptions_Metadata_Enhance", typeof(Resources))]
-        public override string EditorTitle => Resources.PluginOptions_MetadataEnhanceOptions_EditorTitle_Metadata_Enhance;
+        public override string EditorTitle => Resources.PluginOptions_MetadataEnhanceOptions_Metadata_Enhance;
 
         [DisplayName("拼音首字母排序")]
         [Description("中文标题按拼音首字母参与字母索引排序；只改变运行时 SortName 计算，不批量写数据库，也不会覆盖已锁定的 SortName。")]
@@ -57,5 +57,14 @@ namespace StrmAssistant.Options
         [DescriptionL("MetadataEnhanceOptions_EpisodeRefreshLookbackDays_Episode_metadata_refresh_lookback_days__Default_is_365_", typeof(Resources))]
         [Required, MinValue(1)]
         public int EpisodeRefreshLookBackDays { get; set; } = 365;
+
+        // Keep the original serialized/UI property name above while preserving the code-facing
+        // spelling already used by LibraryApi. This avoids breaking existing plugin options files.
+        [Browsable(false)]
+        public int EpisodeRefreshLookbackDays
+        {
+            get => EpisodeRefreshLookBackDays;
+            set => EpisodeRefreshLookBackDays = value;
+        }
     }
 }
