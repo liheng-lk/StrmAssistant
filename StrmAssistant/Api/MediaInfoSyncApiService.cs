@@ -120,7 +120,7 @@ namespace StrmAssistant.Api
                 return result;
             }
 
-            var directoryService = new DirectoryService(Plugin.Instance.Logger, _fileSystem);
+            var directoryService = Plugin.MediaInfoApi.GetMediaInfoRefreshOptions().DirectoryService;
             var exported = await Plugin.MediaInfoApi
                 .SerializeMediaInfo(item.InternalId, directoryService, request?.Overwrite == true,
                     "MediaInfoSync Export")
@@ -168,7 +168,7 @@ namespace StrmAssistant.Api
                 return result;
             }
 
-            var directoryService = new DirectoryService(Plugin.Instance.Logger, _fileSystem);
+            var directoryService = Plugin.MediaInfoApi.GetMediaInfoRefreshOptions().DirectoryService;
             var imported = await Plugin.MediaInfoApi
                 .DeserializeMediaInfo(item, directoryService, "MediaInfoSync Import", false)
                 .ConfigureAwait(false);
