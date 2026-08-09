@@ -62,6 +62,17 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnableMovieDbFallbackLanguages), SimpleCondition.IsTrue)]
         public bool IncludeGenericChineseImageLanguage { get; set; } = true;
 
+        [DisplayName("原始语言海报优先（实验）")]
+        [Description("获取远程图片时保留全部结果，只把推断出的原始语言 Primary 海报排到最前；媒体库首选图片语言其次。不会删除或自动替换已有本地图片。")]
+        [Required]
+        public bool PreferOriginalPoster { get; set; } = false;
+
+        [DisplayName("背景图也优先原始语言")]
+        [Description("开启后 Backdrop 也采用相同的原始语言优先排序；默认关闭，仅影响 Primary 海报。")]
+        [Required]
+        [VisibleCondition(nameof(PreferOriginalPoster), SimpleCondition.IsTrue)]
+        public bool PreferOriginalBackdrop { get; set; } = false;
+
         [DisplayName("拼音首字母排序")]
         [Description("中文标题按拼音首字母参与字母索引排序；只改变运行时 SortName 计算，不批量写数据库，也不会覆盖已锁定的 SortName。")]
         [Required]
