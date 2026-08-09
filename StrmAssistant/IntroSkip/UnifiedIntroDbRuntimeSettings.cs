@@ -9,7 +9,7 @@ namespace StrmAssistant.IntroSkip
         public bool Enabled { get; set; }
         public bool IntroDbAppEnabled { get; set; } = true;
         public bool TheIntroDbEnabled { get; set; } = true;
-        public bool CustomProviderEnabled { get; set; } = true;
+        public bool CustomProviderEnabled { get; set; }
         public string ProviderOrder { get; set; } = "IntroDbApp,TheIntroDb,Custom";
         public int CacheMinutes { get; set; } = 60;
         public string EndpointTemplate { get; set; } = string.Empty;
@@ -17,7 +17,7 @@ namespace StrmAssistant.IntroSkip
         public double MinimumConfidence { get; set; } = 0.75;
         public bool AllowCreditsMarker { get; set; } = true;
         public bool OverwriteExistingMarkers { get; set; }
-        public bool AutoApplyOnItemAdded { get; set; }
+        public bool AutoApplyOnItemAdded { get; set; } = true;
         public int AutoApplyDelaySeconds { get; set; } = 30;
     }
 
@@ -35,7 +35,28 @@ namespace StrmAssistant.IntroSkip
         public static UnifiedIntroDbOptions GetSnapshot()
         {
             EnsureLoaded();
-            lock (Sync) return Clone(_options);
+            lock (Sync)
+            {
+                var result = Clone(_options);
+                var pluginOptions = Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions;
+                if (pluginOptions != null)
+                {
+                    result.Enabled = pluginOptions.EnableIntroSkip && pluginOptions.EnableOnlineIntroDb;
+                    result.IntroDbAppEnabled = pluginOptions.IntroDbAppEnabled;
+                    result.TheIntroDbEnabled = pluginOptions.TheIntroDbEnabled;
+                    result.CustomProviderEnabled = pluginOptions.CustomIntroDbEnabled;
+                    result.ProviderOrder = pluginOptions.IntroDbProviderOrder;
+                    result.CacheMinutes = pluginOptions.IntroDbCacheMinutes;
+                    result.EndpointTemplate = pluginOptions.CustomIntroDbEndpointTemplate;
+                    result.TimeoutSeconds = pluginOptions.IntroDbTimeoutSeconds;
+                    result.MinimumConfidence = pluginOptions.IntroDbMinimumConfidence;
+                    result.AllowCreditsMarker = pluginOptions.IntroDbAllowCreditsMarker;
+                    result.OverwriteExistingMarkers = pluginOptions.IntroDbOverwriteExistingMarkers;
+                    result.AutoApplyOnItemAdded = pluginOptions.IntroDbAutoApplyOnItemAdded;
+                    result.AutoApplyDelaySeconds = pluginOptions.IntroDbAutoApplyDelaySeconds;
+                }
+                return Sanitize(result);
+            }
         }
 
         public static UnifiedIntroDbOptions Save(UnifiedIntroDbOptions value)
@@ -64,7 +85,7 @@ namespace StrmAssistant.IntroSkip
                     "AutoApplyDelaySeconds=" + _options.AutoApplyDelaySeconds
                 });
                 UnifiedIntroDbBridge.ClearCache();
-                return Clone(_options);
+                return GetSnapshot();
             }
         }
 
@@ -98,7 +119,7 @@ namespace StrmAssistant.IntroSkip
                         case "Enabled": result.Enabled = ParseBool(value, false); break;
                         case "IntroDbAppEnabled": result.IntroDbAppEnabled = ParseBool(value, true); break;
                         case "TheIntroDbEnabled": result.TheIntroDbEnabled = ParseBool(value, true); break;
-                        case "CustomProviderEnabled": result.CustomProviderEnabled = ParseBool(value, true); break;
+                        case "CustomProviderEnabled": result.CustomProviderEnabled = ParseBool(value, false); break;
                         case "ProviderOrder": result.ProviderOrder = value; break;
                         case "CacheMinutes": if (int.TryParse(value, out var cache)) result.CacheMinutes = cache; break;
                         case "EndpointTemplate": result.EndpointTemplate = value; break;
@@ -106,7 +127,7 @@ namespace StrmAssistant.IntroSkip
                         case "MinimumConfidence": if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var confidence)) result.MinimumConfidence = confidence; break;
                         case "AllowCreditsMarker": result.AllowCreditsMarker = ParseBool(value, true); break;
                         case "OverwriteExistingMarkers": result.OverwriteExistingMarkers = ParseBool(value, false); break;
-                        case "AutoApplyOnItemAdded": result.AutoApplyOnItemAdded = ParseBool(value, false); break;
+                        case "AutoApplyOnItemAdded": result.AutoApplyOnItemAdded = ParseBool(value, true); break;
                         case "AutoApplyDelaySeconds": if (int.TryParse(value, out var delay)) result.AutoApplyDelaySeconds = delay; break;
                     }
                 }
