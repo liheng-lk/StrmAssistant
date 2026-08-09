@@ -72,7 +72,7 @@ namespace StrmAssistant.Options
         public string DistributedFfprobeExecutablePath { get; set; } = string.Empty;
 
         [DisplayName("分布式 ffmpeg 路径")]
-        [Description("可填写 rffmpeg 的 ffmpeg 软链接/包装器路径；留空使用 PATH 中的 ffmpeg。后续用于截图、BIF、声纹等重任务。")]
+        [Description("可填写 rffmpeg 的 ffmpeg 软链接/包装器路径；留空使用 PATH 中的 ffmpeg。可用于截图、后续 BIF/声纹等重任务。")]
         [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
         public string DistributedFfmpegExecutablePath { get; set; } = string.Empty;
 
@@ -111,16 +111,36 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnableDistributedExtractRouting), SimpleCondition.IsTrue)]
         public int DistributedExtractTimeoutSeconds { get; set; } = 600;
 
-        [DisplayNameL("PluginOptions_EnableImageCapture_Enable_Image_Capture", typeof(Resources))]
-        [DescriptionL("PluginOptions_EnableImageCapture_Perform_image_capture_for_videos_without_primary_image__Default_is_False_", typeof(Resources))]
+        [DisplayName("自定义 / ISO 截图（实验）")]
+        [Description("启用管理员手动 Plan/Apply 单帧截图。支持普通视频以及已启用光盘媒体探测的 Blu-ray ISO/BDMV；不会自动批量覆盖封面。")]
+        [Required]
+        public bool EnableCustomImageCapture { get; set; } = false;
+
+        [DisplayName("本地自定义 ffmpeg 路径")]
+        [Description("留空时使用 PATH 中的 ffmpeg。仅影响本插件的自定义截图流程，不修改 Emby 全局编码器配置。")]
+        [VisibleCondition(nameof(EnableCustomImageCapture), SimpleCondition.IsTrue)]
+        public string ImageCaptureFfmpegExecutablePath { get; set; } = string.Empty;
+
+        [DisplayName("截图使用分布式 ffmpeg")]
+        [Description("开启后优先使用上面的分布式 ffmpeg/rffmpeg 包装器。仅当远端执行后输出图片能够同步回 Emby 临时目录时保存才会成功。")]
+        [Required]
+        [VisibleCondition(nameof(EnableCustomImageCapture), SimpleCondition.IsTrue)]
+        public bool EnableDistributedImageCapture { get; set; } = false;
+
+        [DisplayName("截图超时（秒）")]
+        [Description("单次 ffmpeg 截图最长运行时间。默认 120 秒。")]
+        [Required, MinValue(10), MaxValue(600)]
+        [VisibleCondition(nameof(EnableCustomImageCapture), SimpleCondition.IsTrue)]
+        public int ImageCaptureTimeoutSeconds { get; set; } = 120;
+
         [Browsable(false)]
         [Required]
         public bool EnableImageCapture => false;
 
         [DisplayNameL("MediaInfoExtractOptions_ImageCaptureOffset_Image_Capture_Offset", typeof(Resources))]
-        [DescriptionL("MediaInfoExtractOptions_ImageCaptureOffset_Image_capture_position_as_a_percentage_of_runtime__Default_is_10_", typeof(Resources))]
-        [Required, MinValue(10), MaxValue(90)]
-        [VisibleCondition(nameof(EnableImageCapture), SimpleCondition.IsTrue)]
+        [Description("截图位置，以媒体总时长百分比计算。默认 10%，手动 API 可为单个项目覆盖该值。")]
+        [Required, MinValue(1), MaxValue(99)]
+        [VisibleCondition(nameof(EnableCustomImageCapture), SimpleCondition.IsTrue)]
         public int ImageCapturePosition { get; set; } = 10;
 
         [Browsable(false)]
