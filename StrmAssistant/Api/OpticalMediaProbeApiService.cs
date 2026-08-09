@@ -1,6 +1,7 @@
 using MediaBrowser.Controller.Api;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Serialization;
 using MediaBrowser.Model.Services;
 using StrmAssistant.MediaEnhance;
