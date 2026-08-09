@@ -290,13 +290,14 @@ namespace StrmAssistant.IntroSkip
                 : "?imdb_id=" + Uri.EscapeDataString(identity.SeriesImdbId);
             query += "&season=" + identity.SeasonNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) +
                      "&episode=" + identity.EpisodeNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (identity.DurationMs.HasValue && identity.DurationMs.Value > 0)
+                query += "&duration_ms=" + identity.DurationMs.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
             await WaitForRateGateAsync(cancellationToken).ConfigureAwait(false);
             var json = await GetJsonAsync(V3Endpoint + query, timeoutSeconds, cancellationToken).ConfigureAwait(false);
             var result = Parse(json, identity, "v3");
             if (result != null) return result;
 
-            // v2 is retained only as a compatibility fallback while deployments migrate to v3.
             if (!hasTmdb) return null;
             await WaitForRateGateAsync(cancellationToken).ConfigureAwait(false);
             json = await GetJsonAsync(V2Endpoint + query, timeoutSeconds, cancellationToken).ConfigureAwait(false);
