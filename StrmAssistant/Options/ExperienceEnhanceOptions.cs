@@ -51,6 +51,11 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnableNotificationEnhance), SimpleCondition.IsTrue)]
         public bool NotifyCollectionItemsUpdate { get; set; } = false;
 
+        [DisplayName("复制用户后清空继承的通知设置（实验）")]
+        [Description("只在运行时明确识别到 Emby 的复制用户 CreateUser 重载时生效。仅重置实际发现为 notification/notifier 的用户级配置项；普通新建用户、源用户及其他用户设置不会修改。")]
+        [VisibleCondition(nameof(EnableNotificationEnhance), SimpleCondition.IsTrue)]
+        public bool ClearCopiedUserNotificationSettings { get; set; } = true;
+
         [DisplayName("深度删除")]
         [Description("启用安全深度删除能力。该功能不会绑定 Emby 的 ItemRemoved 事件自动删除文件，只允许由明确的用户删除动作调用。")]
         [Required]
