@@ -22,9 +22,22 @@ setTimeout(() => {
 }, 3200);
 ";
 
+        private const string SettingsTabsLoader = @"
+setTimeout(() => {
+    try {
+        require(['components/strmassistant/settings-tabs']).then((responses) => {
+            const module = responses && responses[0];
+            if (module && typeof module.init === 'function') module.init();
+        });
+    } catch (_) {}
+}, 1400);
+";
+
         private readonly IHttpResultFactory _resultFactory;
         private static readonly Lazy<byte[]> SeriesCollectionsJs =
             new Lazy<byte[]>(() => ReadEmbeddedResource("seriescollections.js"), true);
+        private static readonly Lazy<byte[]> SettingsTabsJs =
+            new Lazy<byte[]>(() => ReadEmbeddedResource("settings-tabs.js"), true);
 
         public ShortcutMenuService(IHttpResultFactory resultFactory)
         {
@@ -45,9 +58,15 @@ setTimeout(() => {
                 (ReadOnlyMemory<byte>)SeriesCollectionsJs.Value, "application/x-javascript");
         }
 
+        public object Get(GetSettingsTabsJs request)
+        {
+            return _resultFactory.GetResult(Request,
+                (ReadOnlyMemory<byte>)SettingsTabsJs.Value, "application/x-javascript");
+        }
+
         public object Get(GetShortcutMenu request)
         {
-            var javascript = ShortcutMenuHelper.ModifiedShortcutsString + SeriesCollectionsLoader;
+            var javascript = ShortcutMenuHelper.ModifiedShortcutsString + SeriesCollectionsLoader + SettingsTabsLoader;
             return _resultFactory.GetResult(javascript.AsSpan(), "application/x-javascript");
         }
 
