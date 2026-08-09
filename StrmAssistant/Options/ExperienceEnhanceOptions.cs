@@ -121,6 +121,11 @@ namespace StrmAssistant.Options
         [Required]
         public bool BeautifyMultipartTitles { get; set; } = false;
 
+        [DisplayName("显示总集数而不是未看集数（实验）")]
+        [Description("仅在 Series/Season DTO 返回层把 UnplayedItemCount 显示值替换成实际 Episode 总数；不修改用户真实已看/未看数据。")]
+        [Required]
+        public bool DisplayTotalEpisodeCount { get; set; } = false;
+
         [DisplayName("播完当前集后补记之前有进度的集")]
         [Description("仅在当前 Episode 因 PlaybackFinished 被标记为已播放后，将同剧中更早且存在播放进度但尚未已播放的集标记为已播放。手工切换已播放状态不会触发。")]
         [Required]
