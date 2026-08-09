@@ -3,6 +3,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Serialization;
 using MediaBrowser.Model.Services;
 using StrmAssistant.MediaEnhance;
@@ -64,6 +65,7 @@ namespace StrmAssistant.Api
         public long? RunTimeTicks { get; set; }
         public int? BitRate { get; set; }
         public string StandardError { get; set; }
+        public BluRayDiscEnrichmentSummary DiscInfo { get; set; }
         public List<OpticalProbeStreamInfo> Streams { get; set; } = new List<OpticalProbeStreamInfo>();
         public List<OpticalProbeChapterInfo> Chapters { get; set; } = new List<OpticalProbeChapterInfo>();
     }
@@ -78,6 +80,7 @@ namespace StrmAssistant.Api
         public string ItemId { get; set; }
         public string ItemName { get; set; }
         public string Kind { get; set; }
+        public BluRayDiscEnrichmentSummary DiscInfo { get; set; }
         public OpticalWriteBackPlan Plan { get; set; }
         public int SavedStreamCount { get; set; }
         public int SavedChapterCount { get; set; }
@@ -86,19 +89,22 @@ namespace StrmAssistant.Api
     /// <summary>
     /// Admin-only Phase 2 optical-media surface. Probe and plan endpoints are read-only.
     /// Write-back requires both the plugin option and Confirm=true for every individual item.
+    /// BDMV folders are additionally enriched with Emby's own Blu-ray examiner before planning/apply.
     /// </summary>
     public sealed class OpticalMediaProbeApiService : BaseApiService
     {
         private readonly ILibraryManager _libraryManager;
         private readonly OpticalMediaProbe _probe;
         private readonly OpticalMediaWriteBack _writeBack;
+        private readonly BluRayDiscInfoEnricher _bluRayEnricher;
 
         public OpticalMediaProbeApiService(ILibraryManager libraryManager, IItemRepository itemRepository,
-            IJsonSerializer jsonSerializer)
+            IJsonSerializer jsonSerializer, IBlurayExaminer blurayExaminer)
         {
             _libraryManager = libraryManager;
             _probe = new OpticalMediaProbe(jsonSerializer);
             _writeBack = new OpticalMediaWriteBack(libraryManager, itemRepository, jsonSerializer);
+            _bluRayEnricher = new BluRayDiscInfoEnricher(blurayExaminer);
         }
 
         public async Task<object> Get(GetOpticalProbeHealth request)
@@ -132,7 +138,8 @@ namespace StrmAssistant.Api
 
             var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
             var result = await _probe.ProbeAsync(item, options, CancellationToken.None).ConfigureAwait(false);
-            return ToProbeResponse(item, result);
+            var discInfo = _bluRayEnricher.Enrich(item, result);
+            return ToProbeResponse(item, result, discInfo);
         }
 
         public async Task<object> Get(GetOpticalWriteBackPlan request)
@@ -142,6 +149,7 @@ namespace StrmAssistant.Api
 
             var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
             var probeResult = await _probe.ProbeAsync(item, options, CancellationToken.None).ConfigureAwait(false);
+            var discInfo = _bluRayEnricher.Enrich(item, probeResult);
             var plan = _writeBack.BuildPlan(item, probeResult);
 
             return new OpticalWriteBackResponse
@@ -153,6 +161,7 @@ namespace StrmAssistant.Api
                 ItemId = item.InternalId.ToString(),
                 ItemName = item.Name,
                 Kind = probeResult.Kind,
+                DiscInfo = discInfo,
                 Plan = plan
             };
         }
@@ -172,6 +181,7 @@ namespace StrmAssistant.Api
                     "Write-back was not confirmed. Review WritebackPlan first, then submit Confirm=true.");
 
             var probeResult = await _probe.ProbeAsync(item, options, CancellationToken.None).ConfigureAwait(false);
+            var discInfo = _bluRayEnricher.Enrich(item, probeResult);
             var writeResult = _writeBack.Apply(item, probeResult);
 
             return new OpticalWriteBackResponse
@@ -184,6 +194,7 @@ namespace StrmAssistant.Api
                 ItemId = item.InternalId.ToString(),
                 ItemName = item.Name,
                 Kind = probeResult.Kind,
+                DiscInfo = discInfo,
                 Plan = writeResult.Plan,
                 SavedStreamCount = writeResult.SavedStreamCount,
                 SavedChapterCount = writeResult.SavedChapterCount
@@ -197,7 +208,8 @@ namespace StrmAssistant.Api
             return _libraryManager.GetItemById(internalId) as Video;
         }
 
-        private static OpticalProbeResponse ToProbeResponse(Video item, OpticalProbeResult result)
+        private static OpticalProbeResponse ToProbeResponse(Video item, OpticalProbeResult result,
+            BluRayDiscEnrichmentSummary discInfo)
         {
             return new OpticalProbeResponse
             {
@@ -213,6 +225,7 @@ namespace StrmAssistant.Api
                 RunTimeTicks = result.RunTimeTicks,
                 BitRate = result.BitRate,
                 StandardError = result.StandardError,
+                DiscInfo = discInfo,
                 Streams = result.Streams,
                 Chapters = result.Chapters
             };
