@@ -1,9 +1,14 @@
 name: Build Plugin
 
 on:
+  push:
+    branches:
+      - main
+      - "agent/**"
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build:
