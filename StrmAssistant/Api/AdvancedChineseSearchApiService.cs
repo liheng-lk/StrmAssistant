@@ -1,6 +1,7 @@
 using MediaBrowser.Controller.Api;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Services;
+using StrmAssistant.Compatibility;
 using StrmAssistant.Search;
 using System.Collections.Generic;
 using System.Threading;
@@ -12,6 +13,7 @@ namespace StrmAssistant.Api
     {
         public AdvancedChineseSearchOptions Options { get; set; }
         public string SettingsPath { get; set; }
+        public AdvancedChineseSearchConnectionCapabilityStatus ConnectionLoader { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
 
@@ -48,9 +50,28 @@ namespace StrmAssistant.Api
     [Authenticated(Roles = "Admin")]
     public sealed class GetAdvancedChineseSearchPlan : IReturn<AdvancedChineseSearchPlanResult> { }
 
+    [Route("/StrmAssistant/Search/AdvancedChinese/Apply", "POST",
+        Summary = "Apply the simple tokenizer after backup, active preflight and runtime connection-loader verification")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class ApplyAdvancedChineseSearch : IReturn<AdvancedChineseSearchMigrationResult>
+    {
+        public bool Confirm { get; set; }
+        public bool AcknowledgeImmediateRestart { get; set; }
+    }
+
+    [Route("/StrmAssistant/Search/AdvancedChinese/Restore", "POST",
+        Summary = "Restore the Emby search FTS tokenizer to unicode61 through a guarded rebuild")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class RestoreAdvancedChineseSearch : IReturn<AdvancedChineseSearchMigrationResult>
+    {
+        public bool Confirm { get; set; }
+        public bool AcknowledgeImmediateRestart { get; set; }
+    }
+
     public sealed class AdvancedChineseSearchApiService : BaseApiService
     {
         private readonly AdvancedChineseSearchDiagnostics _diagnostics = new AdvancedChineseSearchDiagnostics();
+        private readonly AdvancedChineseSearchMigration _migration = new AdvancedChineseSearchMigration();
 
         public object Get(GetAdvancedChineseSearchSettings request)
         {
@@ -84,13 +105,27 @@ namespace StrmAssistant.Api
             return _diagnostics.BuildPlan();
         }
 
+        public async Task<object> Post(ApplyAdvancedChineseSearch request)
+        {
+            return await _migration.ApplyAsync(request?.Confirm == true,
+                request?.AcknowledgeImmediateRestart == true, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        public async Task<object> Post(RestoreAdvancedChineseSearch request)
+        {
+            return await _migration.RestoreAsync(request?.Confirm == true,
+                request?.AcknowledgeImmediateRestart == true, CancellationToken.None).ConfigureAwait(false);
+        }
+
         private static AdvancedChineseSearchSettingsStatus BuildSettingsStatus()
         {
             var options = AdvancedChineseSearchRuntimeSettings.GetSnapshot();
+            var loader = AdvancedChineseSearchConnectionModState.Status;
             var result = new AdvancedChineseSearchSettingsStatus
             {
                 Options = options,
-                SettingsPath = AdvancedChineseSearchRuntimeSettings.SettingsPath
+                SettingsPath = AdvancedChineseSearchRuntimeSettings.SettingsPath,
+                ConnectionLoader = loader
             };
 
             if (options.Enabled && string.IsNullOrWhiteSpace(options.NativeExtensionPath))
@@ -100,7 +135,14 @@ namespace StrmAssistant.Api
             if (options.Enabled && string.IsNullOrWhiteSpace(options.DatabasePath) &&
                 string.IsNullOrWhiteSpace(AdvancedChineseSearchRuntimeSettings.ResolveDatabasePath(options)))
                 result.Warnings.Add("library.db could not be auto-resolved; configure DatabasePath explicitly.");
-            result.Warnings.Add("Apply/Restore is intentionally not exposed until the runtime pooled-connection extension loader and version-specific FTS schema adapter are verified.");
+            if (options.Enabled && loader?.Patched != true)
+                result.Warnings.Add("The runtime SQLite CreateConnection loader is not patched; Apply will be refused.");
+            if (options.Enabled && loader?.Patched == true && loader.LoadAttempts < 1)
+                result.Warnings.Add("No runtime SQLite connection has yet been observed loading the tokenizer. Trigger a normal library query/restart and re-check before Apply.");
+            if (options.Enabled && loader?.LoadFailures > 0)
+                result.Warnings.Add("At least one observed runtime SQLite connection failed to load the tokenizer; Apply will be refused until the runtime issue is resolved.");
+            result.Warnings.Add("Apply always creates and integrity-checks a sqlite3 backup, rebuilds only fts_search8/9 in one transaction, and requires immediate Emby restart afterwards.");
+            result.Warnings.Add("Restore rebuilds only the FTS table back to unicode61; it never copies a full backup over a live library.db file.");
             return result;
         }
     }
