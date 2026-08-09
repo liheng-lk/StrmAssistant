@@ -20,6 +20,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using static StrmAssistant.Common.LanguageUtility;
@@ -917,11 +918,80 @@ namespace StrmAssistant.Common
 
         public async Task<string> GetStrmMountPath(string strmPath)
         {
-            var path = strmPath.AsMemory();
+            using var mediaMount = await MountStrmPath(strmPath).ConfigureAwait(false);
+            return GetMountedPath(mediaMount);
+        }
 
-            using var mediaMount = await _mediaMountManager.Mount(path, null, CancellationToken.None);
+        private async Task<IMediaMount> MountStrmPath(string strmPath)
+        {
+            var mountMethod = _mediaMountManager?.GetType()
+                .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .FirstOrDefault(method =>
+                {
+                    if (!string.Equals(method.Name, "Mount", StringComparison.Ordinal)) return false;
+                    var parameters = method.GetParameters();
+                    return parameters.Length == 3 &&
+                           parameters[2].ParameterType == typeof(CancellationToken) &&
+                           (parameters[0].ParameterType == typeof(string) ||
+                            parameters[0].ParameterType == typeof(ReadOnlyMemory<char>));
+                });
 
-            return mediaMount?.MountedPath;
+            if (mountMethod == null)
+            {
+                _logger.Warn("STRM mount - no compatible IMediaMountManager.Mount overload was found.");
+                return null;
+            }
+
+            var parameters = mountMethod.GetParameters();
+            object invoked;
+            try
+            {
+                invoked = mountMethod.Invoke(_mediaMountManager, new[]
+                {
+                    GetMountArgument(parameters[0].ParameterType, strmPath),
+                    GetMountArgument(parameters[1].ParameterType, null),
+                    (object)CancellationToken.None
+                });
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                throw ex.InnerException;
+            }
+
+            if (!(invoked is Task task))
+                throw new InvalidOperationException("IMediaMountManager.Mount did not return Task.");
+
+            await task.ConfigureAwait(false);
+            return task.GetType().GetProperty("Result", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(task) as IMediaMount;
+        }
+
+        private static object GetMountArgument(Type parameterType, string value)
+        {
+            if (parameterType == typeof(string)) return value;
+            if (parameterType == typeof(ReadOnlyMemory<char>))
+                return value?.AsMemory() ?? ReadOnlyMemory<char>.Empty;
+            return value;
+        }
+
+        private static string GetMountedPath(IMediaMount mediaMount)
+        {
+            if (mediaMount == null) return null;
+
+            var mediaMountType = mediaMount.GetType();
+            if (mediaMountType.GetProperty("MountedPath", BindingFlags.Instance | BindingFlags.Public)
+                    ?.GetValue(mediaMount) is string mountedPath &&
+                !string.IsNullOrWhiteSpace(mountedPath))
+            {
+                return mountedPath;
+            }
+
+            var mountedPathInfo = mediaMountType
+                .GetProperty("MountedPathInfo", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(mediaMount);
+            return mountedPathInfo?.GetType()
+                .GetProperty("FullName", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(mountedPathInfo) as string;
         }
 
         public BaseItem[] GetItemsByIds(long[] itemIds)
