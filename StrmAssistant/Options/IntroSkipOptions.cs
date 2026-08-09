@@ -67,6 +67,84 @@ namespace StrmAssistant.Options
         [DescriptionL("PluginOptions_EnableIntroSkip_Enable_intro_skip_and_credits_skip_for_episodes__Default_is_False_", typeof(Resources))]
         public bool EnableIntroSkip { get; set; } = false;
 
+        [DisplayName("启用在线片头/片尾数据库匹配")]
+        [Description("开启后将在线数据库匹配并入片头片尾流程。优先使用 IntroDB.app 与 TheIntroDB.org；匹配不到时仍可继续使用 Emby 原生声纹。")]
+        [Required]
+        [VisibleCondition(nameof(EnableIntroSkip), SimpleCondition.IsTrue)]
+        public bool EnableOnlineIntroDb { get; set; } = true;
+
+        [DisplayName("使用 IntroDB.app")]
+        [Description("内置接口：https://api.introdb.app/segments；若新接口没有完整片头数据，会回退 https://api.introdb.app/intro。按剧集 IMDb ID + 季号 + 集号匹配。")]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public bool IntroDbAppEnabled { get; set; } = true;
+
+        [DisplayName("使用 TheIntroDB.org")]
+        [Description("内置接口：https://api.theintrodb.org/v2/media。按剧集 TMDB ID + 季号 + 集号匹配，可返回片头、回顾、片尾/预告分段。")]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public bool TheIntroDbEnabled { get; set; } = true;
+
+        [DisplayName("启用自定义片头数据库")]
+        [Description("可选第三方来源。关闭时不会访问自定义地址；IntroDB.app 与 TheIntroDB.org 不受影响。")]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public bool CustomIntroDbEnabled { get; set; } = false;
+
+        [DisplayName("自定义片头数据库 URL 模板")]
+        [Description("支持 {series_tmdb}、{series_imdb}、{episode_tmdb}、{episode_imdb}、{season}、{episode}、{series_name}、{episode_name} 占位符。")]
+        [VisibleCondition(nameof(CustomIntroDbEnabled), SimpleCondition.IsTrue)]
+        public string CustomIntroDbEndpointTemplate { get; set; } = string.Empty;
+
+        [DisplayName("片头数据库优先级")]
+        [Description("从左到右查询并合并缺失字段。可用值：IntroDbApp,TheIntroDb,Custom。")]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public string IntroDbProviderOrder { get; set; } = "IntroDbApp,TheIntroDb,Custom";
+
+        [DisplayName("在线匹配缓存（分钟）")]
+        [Description("相同剧集匹配结果的缓存时间，0 表示不缓存。")]
+        [MinValue(0), MaxValue(1440)]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public int IntroDbCacheMinutes { get; set; } = 60;
+
+        [DisplayName("在线匹配超时（秒）")]
+        [MinValue(3), MaxValue(120)]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public int IntroDbTimeoutSeconds { get; set; } = 15;
+
+        [DisplayName("在线匹配最低置信度")]
+        [Description("0–1。低于该值的在线片头结果不会自动写入标记。")]
+        [MinValue(0), MaxValue(1)]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public double IntroDbMinimumConfidence { get; set; } = 0.75;
+
+        [DisplayName("在线匹配允许写入片尾标记")]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public bool IntroDbAllowCreditsMarker { get; set; } = true;
+
+        [DisplayName("新增剧集后自动应用在线匹配")]
+        [Description("开启后，新加入的剧集会在延迟后查询在线片头库；高置信度结果直接写入片头/片尾标记。已有完整标记默认不会被覆盖。")]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public bool IntroDbAutoApplyOnItemAdded { get; set; } = true;
+
+        [DisplayName("在线匹配延迟（秒）")]
+        [Description("等待新剧集完成基础元数据识别并获得 TMDB/IMDb ID 后再查询在线片头库。")]
+        [MinValue(3), MaxValue(300)]
+        [Required]
+        [VisibleCondition(nameof(IntroDbAutoApplyOnItemAdded), SimpleCondition.IsTrue)]
+        public int IntroDbAutoApplyDelaySeconds { get; set; } = 30;
+
+        [DisplayName("在线匹配覆盖已有标记")]
+        [Description("默认关闭。关闭时在线数据库只补缺失的片头/片尾标记，不删除或覆盖 Emby 已有检测结果。")]
+        [Required]
+        [VisibleCondition(nameof(EnableOnlineIntroDb), SimpleCondition.IsTrue)]
+        public bool IntroDbOverwriteExistingMarkers { get; set; } = false;
+
         [DisplayNameL("IntroSkipOptions_MaxIntroDurationSeconds", typeof(Resources))]
         [MinValue(10), MaxValue(600)]
         [Required]
