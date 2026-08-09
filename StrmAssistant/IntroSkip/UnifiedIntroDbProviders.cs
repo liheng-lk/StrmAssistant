@@ -49,13 +49,20 @@ namespace StrmAssistant.IntroSkip
             try
             {
                 using var response = await HttpClient.SendAsync(request, "GET").ConfigureAwait(false);
-                if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300) return null;
+                if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300)
+                {
+                    if (Plugin.Instance?.DebugMode == true)
+                        Plugin.Instance.Logger.Debug(Name + " request returned HTTP " + (int)response.StatusCode + ": " + url);
+                    return null;
+                }
                 await using var stream = response.Content;
                 using var reader = new StreamReader(stream);
                 return await reader.ReadToEndAsync().ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
+                if (Plugin.Instance?.DebugMode == true)
+                    Plugin.Instance.Logger.Debug(Name + " request timed out: " + url);
                 return null;
             }
             catch (Exception ex)
@@ -93,6 +100,7 @@ namespace StrmAssistant.IntroSkip
         public override async Task<UnifiedIntroDbDocument> FetchAsync(UnifiedIntroDbIdentity identity,
             int timeoutSeconds, CancellationToken cancellationToken)
         {
+            // IntroDB.app keys TV episodes by parent-series IMDb + season + episode.
             if (identity == null || string.IsNullOrWhiteSpace(identity.SeriesImdbId) ||
                 !identity.SeasonNumber.HasValue || !identity.EpisodeNumber.HasValue)
                 return null;
@@ -101,12 +109,14 @@ namespace StrmAssistant.IntroSkip
                         "&season=" + identity.SeasonNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) +
                         "&episode=" + identity.EpisodeNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
+            // /segments is the current API and can return intro, recap and outro in one request.
             var json = await GetJsonAsync(BaseUrl + "/segments" + query, timeoutSeconds, cancellationToken)
                 .ConfigureAwait(false);
             var fromSegments = ParseSegments(json);
             if (fromSegments?.IntroStartSeconds.HasValue == true && fromSegments.IntroEndSeconds.HasValue)
                 return fromSegments;
 
+            // Keep the legacy intro-only endpoint as a compatibility fallback.
             json = await GetJsonAsync(BaseUrl + "/intro" + query, timeoutSeconds, cancellationToken)
                 .ConfigureAwait(false);
             var legacy = ParseLegacyIntro(json);
@@ -132,6 +142,10 @@ namespace StrmAssistant.IntroSkip
             if (string.IsNullOrWhiteSpace(json)) return null;
             try
             {
+                // IntroDB accepts clock-style timestamps (mm:ss / hh:mm:ss). Normalize those values
+                // before handing the payload to Emby's serializer, while leaving numeric payloads untouched.
+                json = NormalizeClockStyleSegmentFields(json);
+
                 List<IntroDbAppSegment> segments = null;
                 var trimmed = json.TrimStart();
                 if (trimmed.StartsWith("[", StringComparison.Ordinal))
@@ -229,6 +243,52 @@ namespace StrmAssistant.IntroSkip
                     target.CreditsConfidence = confidence;
                     break;
             }
+        }
+
+        private static string NormalizeClockStyleSegmentFields(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return json;
+            return System.Text.RegularExpressions.Regex.Replace(
+                json,
+                "\\\"(?<key>start_sec|end_sec)\\\"\\s*:\\s*\\\"(?<value>[^\\\"]+)\\\"",
+                match =>
+                {
+                    if (!TryParseClockOrSeconds(match.Groups["value"].Value, out var seconds)) return match.Value;
+                    return "\"" + match.Groups["key"].Value + "\":" +
+                           seconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                },
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+
+        private static bool TryParseClockOrSeconds(string value, out double seconds)
+        {
+            seconds = 0;
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            var text = value.Trim();
+            if (double.TryParse(text, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out seconds))
+                return seconds >= 0;
+
+            var parts = text.Split(':');
+            if (parts.Length != 2 && parts.Length != 3) return false;
+            var values = new double[parts.Length];
+            for (var i = 0; i < parts.Length; i++)
+            {
+                if (!double.TryParse(parts[i], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out values[i]) || values[i] < 0)
+                    return false;
+            }
+
+            if (parts.Length == 2)
+            {
+                if (values[1] >= 60) return false;
+                seconds = values[0] * 60d + values[1];
+                return true;
+            }
+
+            if (values[1] >= 60 || values[2] >= 60) return false;
+            seconds = values[0] * 3600d + values[1] * 60d + values[2];
+            return true;
         }
 
         private sealed class IntroDbAppSegmentsEnvelope
