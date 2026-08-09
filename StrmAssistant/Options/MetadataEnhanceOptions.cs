@@ -18,7 +18,12 @@ namespace StrmAssistant.Options
     public class MetadataEnhanceOptions : EditableOptionsBase
     {
         [DisplayNameL("PluginOptions_MetadataEnhanceOptions_Metadata_Enhance", typeof(Resources))]
-        public override string EditorTitle => Resources.PluginOptions_MetadataEnhanceOptions_Metadata_Enhance;
+        public override string EditorTitle => Resources.PluginOptions_MetadataEnhanceOptions_EditorTitle_Metadata_Enhance;
+
+        [DisplayName("拼音首字母排序")]
+        [Description("中文标题按拼音首字母参与字母索引排序；只改变运行时 SortName 计算，不批量写数据库，也不会覆盖已锁定的 SortName。")]
+        [Required]
+        public bool PinyinSortName { get; set; } = false;
         
         [Browsable(false)]
         [Required]
@@ -51,6 +56,6 @@ namespace StrmAssistant.Options
         [DisplayNameL("MetadataEnhanceOptions_EpisodeRefreshLookBackDays_Episode_Refresh_Lookback_Days", typeof(Resources))]
         [DescriptionL("MetadataEnhanceOptions_EpisodeRefreshLookbackDays_Episode_metadata_refresh_lookback_days__Default_is_365_", typeof(Resources))]
         [Required, MinValue(1)]
-        public int EpisodeRefreshLookbackDays { get; set; } = 365;
+        public int EpisodeRefreshLookBackDays { get; set; } = 365;
     }
 }
