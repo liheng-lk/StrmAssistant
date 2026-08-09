@@ -1,6 +1,6 @@
 using HarmonyLib;
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Dto;
 using StrmAssistant.Experience;
@@ -40,25 +40,27 @@ namespace StrmAssistant.Compatibility
 
             try
             {
-                var targets = typeof(Video).GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                var candidates = typeof(Video)
+                    .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                     .Where(method => string.Equals(method.Name, "GetMediaSources", StringComparison.Ordinal) &&
-                                     typeof(IEnumerable<MediaSourceInfo>).IsAssignableFrom(method.ReturnType))
+                                     method.ReturnType == typeof(List<MediaSourceInfo>))
+                    .Concat(typeof(BaseItem)
+                        .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+                        .Where(method => string.Equals(method.Name, "GetMediaSources", StringComparison.Ordinal) &&
+                                         method.ReturnType == typeof(List<MediaSourceInfo>)))
                     .ToArray();
 
-                // Most Emby builds return List<MediaSourceInfo>, which does not satisfy the interface
-                // assignability test above in every reflection/runtime combination. Include exact generic list.
-                if (targets.Length == 0)
-                {
-                    targets = typeof(Video).GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                        .Where(method => string.Equals(method.Name, "GetMediaSources", StringComparison.Ordinal) &&
-                                         method.ReturnType == typeof(List<MediaSourceInfo>))
-                        .ToArray();
-                }
+                var targets = candidates
+                    .Select(ResolveImplementedDeclaration)
+                    .Where(method => method != null && !method.IsAbstract)
+                    .GroupBy(GetMethodIdentity, StringComparer.Ordinal)
+                    .Select(group => group.First())
+                    .ToArray();
 
                 status.TargetFound = targets.Length > 0;
                 if (targets.Length == 0)
                 {
-                    status.Error = "Video.GetMediaSources returning MediaSourceInfo list was not found.";
+                    status.Error = "No implemented BaseItem/Video.GetMediaSources returning List<MediaSourceInfo> was found.";
                     return;
                 }
 
@@ -69,16 +71,20 @@ namespace StrmAssistant.Compatibility
 
                 foreach (var target in targets)
                 {
-                    // Only patch concrete List<MediaSourceInfo> returns; a future incompatible return type
-                    // is reported through capability state rather than guessed.
-                    if (target.ReturnType != typeof(List<MediaSourceInfo>)) continue;
-                    _harmony.Patch(target, postfix: new HarmonyMethod(postfix));
-                    status.Targets.Add(target.ToString());
+                    try
+                    {
+                        _harmony.Patch(target, postfix: new HarmonyMethod(postfix));
+                        status.Targets.Add(target.DeclaringType?.FullName + "." + target);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Instance?.Logger?.Debug("Multi-version GetMediaSources candidate skipped: " + ex.Message);
+                    }
                 }
 
                 status.Patched = status.Targets.Count > 0;
                 if (!status.Patched)
-                    status.Error = "GetMediaSources overloads were found but no compatible List<MediaSourceInfo> return type was available.";
+                    status.Error = "GetMediaSources candidates were found, but none could be patched.";
             }
             catch (Exception ex)
             {
@@ -91,15 +97,46 @@ namespace StrmAssistant.Compatibility
         {
             try { _harmony?.UnpatchAll(HarmonyId); } catch { }
         }
+
+        private static MethodInfo ResolveImplementedDeclaration(MethodInfo method)
+        {
+            if (method == null) return null;
+
+            try
+            {
+                var baseDefinition = method.GetBaseDefinition();
+                if (baseDefinition != null && !baseDefinition.IsAbstract)
+                    return baseDefinition;
+            }
+            catch
+            {
+                // Fall through to the reflected method.
+            }
+
+            return method.IsAbstract ? null : method;
+        }
+
+        private static string GetMethodIdentity(MethodInfo method)
+        {
+            if (method == null) return string.Empty;
+            try
+            {
+                return method.Module.ModuleVersionId + ":" + method.MetadataToken;
+            }
+            catch
+            {
+                return (method.DeclaringType?.AssemblyQualifiedName ?? string.Empty) + ":" + method;
+            }
+        }
     }
 
     public static class MultiVersionDisplayPatches
     {
-        public static void GetMediaSourcesPostfix(Video __instance, ref List<MediaSourceInfo> __result)
+        public static void GetMediaSourcesPostfix(BaseItem __instance, ref List<MediaSourceInfo> __result)
         {
             try
             {
-                if (__instance == null || __result == null || __result.Count <= 1) return;
+                if (!(__instance is Video) || __result == null || __result.Count <= 1) return;
                 __result = MultiVersionRuntimeSettings.Enhance(__result);
             }
             catch (Exception ex)
