@@ -20,6 +20,26 @@ namespace StrmAssistant.Options
         [DisplayNameL("PluginOptions_MetadataEnhanceOptions_Metadata_Enhance", typeof(Resources))]
         public override string EditorTitle => Resources.PluginOptions_MetadataEnhanceOptions_Metadata_Enhance;
 
+        [DisplayName("替代 TMDB 配置（实验）")]
+        [Description("默认关闭。仅改写 MovieDb provider 发出的 TMDB API/图片 URL，不修改系统代理或其他元数据提供器。配置无效时自动保持原生地址。")]
+        [Required]
+        public bool EnableAlternateMovieDbConfig { get; set; } = false;
+
+        [DisplayName("替代 TMDB API 地址")]
+        [Description("可选，例如 https://api.tmdb.org 或自建兼容反代。必须是 HTTP/HTTPS 绝对地址；留空继续使用 MovieDb 原生 API 地址。")]
+        [VisibleCondition(nameof(EnableAlternateMovieDbConfig), SimpleCondition.IsTrue)]
+        public string AlternateMovieDbApiUrl { get; set; } = string.Empty;
+
+        [DisplayName("替代 TMDB 图片地址")]
+        [Description("可选，例如自建 image.tmdb.org 兼容反代。只替换以 https://image.tmdb.org 开头的远程图片 URL。")]
+        [VisibleCondition(nameof(EnableAlternateMovieDbConfig), SimpleCondition.IsTrue)]
+        public string AlternateMovieDbImageUrl { get; set; } = string.Empty;
+
+        [DisplayName("替代 TMDB API Key")]
+        [Description("可选，仅接受 32 位十六进制 v3 API key。留空或格式无效时继续使用 MovieDb 内置 key。")]
+        [VisibleCondition(nameof(EnableAlternateMovieDbConfig), SimpleCondition.IsTrue)]
+        public string AlternateMovieDbApiKey { get; set; } = string.Empty;
+
         [DisplayName("TMDB 元数据回退语言（实验）")]
         [Description("默认关闭。扩展 MovieDb 自身的元数据语言链，不替换 MovieDb provider；优先语言缺少标题/简介时，可继续尝试指定回退语言。目标接口不可用时自动保持原生行为。")]
         [Required]
