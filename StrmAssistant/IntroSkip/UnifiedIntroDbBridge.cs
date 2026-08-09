@@ -40,6 +40,7 @@ namespace StrmAssistant.IntroSkip
         public int? EpisodeNumber { get; set; }
         public string SeriesName { get; set; }
         public string EpisodeName { get; set; }
+        public long? DurationMs { get; set; }
     }
 
     public sealed class UnifiedIntroDbBridge
@@ -80,7 +81,10 @@ namespace StrmAssistant.IntroSkip
                 SeasonNumber = episode.ParentIndexNumber,
                 EpisodeNumber = episode.IndexNumber,
                 SeriesName = episode.Series?.Name,
-                EpisodeName = episode.Name
+                EpisodeName = episode.Name,
+                DurationMs = episode.RunTimeTicks.HasValue && episode.RunTimeTicks.Value > 0
+                    ? episode.RunTimeTicks.Value / TimeSpan.TicksPerMillisecond
+                    : (long?)null
             };
         }
 
@@ -160,7 +164,8 @@ namespace StrmAssistant.IntroSkip
                 .Replace("{season}", identity.SeasonNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))
                 .Replace("{episode}", identity.EpisodeNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))
                 .Replace("{series_name}", Escape(identity.SeriesName))
-                .Replace("{episode_name}", Escape(identity.EpisodeName));
+                .Replace("{episode_name}", Escape(identity.EpisodeName))
+                .Replace("{duration_ms}", identity.DurationMs?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty);
 
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
                 (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
@@ -339,6 +344,7 @@ namespace StrmAssistant.IntroSkip
                 identity.SeriesImdbId ?? string.Empty,
                 identity.SeasonNumber?.ToString() ?? string.Empty,
                 identity.EpisodeNumber?.ToString() ?? string.Empty,
+                identity.DurationMs?.ToString() ?? string.Empty,
                 options.IntroDbAppEnabled.ToString(), options.TheIntroDbEnabled.ToString(),
                 options.CustomProviderEnabled.ToString(), options.ProviderOrder ?? string.Empty,
                 options.EndpointTemplate ?? string.Empty
