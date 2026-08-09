@@ -12,6 +12,7 @@ namespace StrmAssistant.Api
         public string GeneratedUtc { get; set; }
         public bool NotificationEnhanceEnabled { get; set; }
         public LibraryNotificationDescriptionCapabilityStatus NativeLibraryNotificationPatch { get; set; }
+        public RemovedEpisodeNotificationCapabilityStatus RemovedEpisodeNotificationBridge { get; set; }
         public bool CopiedUserNotificationCleanupEnabled { get; set; }
         public CopiedUserNotificationCleanupCapabilityStatus CopiedUserNotificationCleanup { get; set; }
         public bool LogLinesNewestFirstEnabled { get; set; }
@@ -36,6 +37,7 @@ namespace StrmAssistant.Api
                 GeneratedUtc = DateTimeOffset.UtcNow.ToString("O"),
                 NotificationEnhanceEnabled = options?.EnableNotificationEnhance == true,
                 NativeLibraryNotificationPatch = LibraryNotificationDescriptionModState.Status,
+                RemovedEpisodeNotificationBridge = RemovedEpisodeNotificationModState.Status,
                 CopiedUserNotificationCleanupEnabled = options?.EnableNotificationEnhance == true &&
                                                         options.ClearCopiedUserNotificationSettings,
                 CopiedUserNotificationCleanup = CopiedUserNotificationCleanupModState.Status,
@@ -47,6 +49,8 @@ namespace StrmAssistant.Api
 
             if (result.NotificationEnhanceEnabled && result.NativeLibraryNotificationPatch?.Patched != true)
                 result.Notes.Add("Notification enhancement is enabled but the native NewLibraryContent patch is not active.");
+            if (result.NotificationEnhanceEnabled && result.RemovedEpisodeNotificationBridge?.Patched != true)
+                result.Notes.Add("Notification enhancement is enabled but the removed-Episode ActivityLog ItemId bridge is not active; delete notifications will keep native description text.");
             if (result.CopiedUserNotificationCleanupEnabled && result.CopiedUserNotificationCleanup?.CloneCreateUserTargetFound != true)
                 result.Notes.Add("Copied-user notification cleanup is enabled, but this Emby runtime does not expose the clone-user CreateUser overload. Normal user creation is left untouched.");
             if (result.CopiedUserNotificationCleanupEnabled && result.CopiedUserNotificationCleanup?.Patched == true &&
