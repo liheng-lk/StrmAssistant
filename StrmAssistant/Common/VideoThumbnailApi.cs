@@ -24,6 +24,7 @@ namespace StrmAssistant.Common
     {
         private readonly ILogger _logger;
         private readonly ILibraryManager _libraryManager;
+        private readonly DistributedChapterImageGenerator _distributedChapterImageGenerator;
 
         private readonly object _thumbnailGenerator;
         private readonly MethodInfo _refreshThumbnailImages;
@@ -38,6 +39,7 @@ namespace StrmAssistant.Common
         {
             _logger = Plugin.Instance.Logger;
             _libraryManager = libraryManager;
+            _distributedChapterImageGenerator = new DistributedChapterImageGenerator(fileSystem, itemRepository);
 
             try
             {
@@ -74,14 +76,51 @@ namespace StrmAssistant.Common
             }
         }
 
-        public Task<bool> RefreshThumbnailImages(Video item, LibraryOptions libraryOptions,
+        public async Task<bool> RefreshThumbnailImages(Video item, LibraryOptions libraryOptions,
             IDirectoryService directoryService, List<ChapterInfo> chapters, bool extractImages, bool saveChapters,
             CancellationToken cancellationToken)
         {
             if (MediaExtractionFilter.ShouldSkip(item, out var reason))
             {
                 _logger.Info("VideoThumbnailExtract - Skipped by extraction blacklist: {0} ({1})", item.Path, reason);
-                return Task.FromResult(false);
+                return false;
+            }
+
+            var options = Plugin.Instance.GetPluginOptions().MediaInfoExtractOptions;
+            if (extractImages && options.EnableDistributedChapterImageRouting)
+            {
+                try
+                {
+                    var distributedResult = await _distributedChapterImageGenerator
+                        .GenerateMissingAsync(item, chapters, options, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (distributedResult.Attempted)
+                    {
+                        _logger.Info(
+                            "VideoThumbnailExtract - Distributed chapter image pre-generation for {0}: generated={1}, existing={2}, failed={3}, fallback={4}, executable={5}",
+                            item.Path, distributedResult.GeneratedCount, distributedResult.ExistingCount,
+                            distributedResult.FailedCount, distributedResult.FellBackToNative,
+                            distributedResult.Executable);
+
+                        if (!string.IsNullOrWhiteSpace(distributedResult.Error))
+                            _logger.Warn("VideoThumbnailExtract - Distributed chapter image detail: {0}",
+                                distributedResult.Error);
+
+                        if (!distributedResult.Success && !options.DistributedChapterImageFallbackToEmby)
+                            return false;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.ErrorException("VideoThumbnailExtract - Distributed chapter pre-generation failed for {0}",
+                        ex, item.Path);
+                    if (!options.DistributedChapterImageFallbackToEmby) return false;
+                }
             }
 
             var mediaSource = AppVer >= Ver4936
@@ -100,7 +139,8 @@ namespace StrmAssistant.Common
                     cancellationToken
                 };
 
-            return (Task<bool>)_refreshThumbnailImages.Invoke(_thumbnailGenerator, parameters);
+            return await ((Task<bool>)_refreshThumbnailImages.Invoke(_thumbnailGenerator, parameters))
+                .ConfigureAwait(false);
         }
 
         public List<Video> FetchExtractTaskItems()
