@@ -126,6 +126,11 @@ namespace StrmAssistant.Options
         [Required]
         public bool DisplayTotalEpisodeCount { get; set; } = false;
 
+        [DisplayName("主页媒体库显示项目数（实验）")]
+        [Description("在顶级媒体库 DTO 的 RecursiveItemCount 中写入主内容类型数量：电影库计 Movie、电视剧库计 Series、音乐库计 MusicAlbum 等；仅影响客户端显示，不修改媒体库。")]
+        [Required]
+        public bool DisplayLibraryItemCount { get; set; } = false;
+
         [DisplayName("播完当前集后补记之前有进度的集")]
         [Description("仅在当前 Episode 因 PlaybackFinished 被标记为已播放后，将同剧中更早且存在播放进度但尚未已播放的集标记为已播放。手工切换已播放状态不会触发。")]
         [Required]
