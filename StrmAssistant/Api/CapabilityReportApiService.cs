@@ -49,6 +49,10 @@ namespace StrmAssistant.Api
         public bool ModSupported { get; set; }
         public CapabilityOptionSummary Options { get; set; }
         public RuntimeModCapabilityStatus RuntimeMods { get; set; }
+        public MediaInfoRuntimeFallbackCapabilityStatus MediaInfoCompatibility { get; set; }
+        public Fingerprint410CapabilityStatus Fingerprint410Compatibility { get; set; }
+        public StrmMount410CapabilityStatus StrmMount410Compatibility { get; set; }
+        public VideoThumbnail410CapabilityStatus VideoThumbnail410Compatibility { get; set; }
         public DistributedExtractHealthResult DistributedTools { get; set; }
         public FingerprintRuntimeCapabilityResult Fingerprint { get; set; }
         public OpticalProbeHealthResponse OpticalProbe { get; set; }
@@ -128,6 +132,10 @@ namespace StrmAssistant.Api
                     PeopleDisplayFilter = experienceOptions?.EnablePeopleDisplayFilter == true
                 },
                 RuntimeMods = RuntimeModState.Status,
+                MediaInfoCompatibility = MediaInfoRuntimeFallbackState.Status,
+                Fingerprint410Compatibility = Fingerprint410CompatibilityState.Status,
+                StrmMount410Compatibility = StrmMount410CompatibilityState.Status,
+                VideoThumbnail410Compatibility = VideoThumbnail410CompatibilityState.Status,
                 DistributedTools = await distributedTask.ConfigureAwait(false),
                 Fingerprint = _fingerprintDiagnostics.Inspect(Plugin.FingerprintApi),
                 OpticalProbe = new OpticalProbeHealthResponse
@@ -143,6 +151,17 @@ namespace StrmAssistant.Api
 
             if (!compatibility.IsKnown)
                 report.Warnings.Add("Emby runtime version could not be detected; version-sensitive features will rely on capability discovery only.");
+            if (report.MediaInfoCompatibility?.TargetFound != true)
+                report.Warnings.Add("MediaInfo compatibility bridge did not find its wrapper target.");
+            if (report.Fingerprint410Compatibility?.SeasonFingerprintPatched != true ||
+                report.Fingerprint410Compatibility?.UpdateSequencePatched != true)
+                report.Warnings.Add("Fingerprint compatibility bridge is incomplete; IntroSkip runtime testing is required before enabling automatic marker work.");
+            if (report.StrmMount410Compatibility?.Patched != true ||
+                report.StrmMount410Compatibility?.MountMethodFound != true)
+                report.Warnings.Add("STRM mount compatibility bridge is incomplete; STRM-dependent native tasks may not resolve mounted media paths.");
+            if (report.VideoThumbnail410Compatibility?.Patched != true ||
+                report.VideoThumbnail410Compatibility?.NativeRefreshMethodFound != true)
+                report.Warnings.Add("Thumbnail compatibility bridge is incomplete; chapter/BIF extraction should remain disabled until verified.");
             if (report.Options.DistributedFingerprint && report.DistributedTools?.Ffmpeg?.ChromaprintTestPassed == false)
                 report.Warnings.Add("Distributed fingerprint routing is enabled but the active Chromaprint test failed.");
             if (report.Options.OpticalProbe && report.OpticalProbe?.HasBlurayProtocol != true)
