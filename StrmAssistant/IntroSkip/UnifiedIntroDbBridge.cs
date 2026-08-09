@@ -66,10 +66,7 @@ namespace StrmAssistant.IntroSkip
             _theIntroDb = new TheIntroDbProvider(httpClient, jsonSerializer);
         }
 
-        public static void ClearCache()
-        {
-            Cache.Clear();
-        }
+        public static void ClearCache() => Cache.Clear();
 
         public UnifiedIntroDbIdentity ResolveIdentity(Episode episode)
         {
@@ -107,34 +104,19 @@ namespace StrmAssistant.IntroSkip
             foreach (var provider in ParseProviderOrder(options.ProviderOrder))
             {
                 UnifiedIntroDbDocument current = null;
-                switch (provider)
-                {
-                    case "introdbapp":
-                        if (options.IntroDbAppEnabled)
-                            current = await _introDbApp.FetchAsync(identity, options.TimeoutSeconds, cancellationToken)
-                                .ConfigureAwait(false);
-                        break;
-                    case "theintrodb":
-                        if (options.TheIntroDbEnabled)
-                            current = await _theIntroDb.FetchAsync(identity, options.TimeoutSeconds, cancellationToken)
-                                .ConfigureAwait(false);
-                        break;
-                    case "custom":
-                        if (options.CustomProviderEnabled)
-                            current = await FetchCustomAsync(options.EndpointTemplate, identity, options.TimeoutSeconds,
-                                cancellationToken).ConfigureAwait(false);
-                        break;
-                }
+                if (provider == "introdbapp" && options.IntroDbAppEnabled)
+                    current = await _introDbApp.FetchAsync(identity, options.TimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                else if (provider == "theintrodb" && options.TheIntroDbEnabled)
+                    current = await _theIntroDb.FetchAsync(identity, options.TimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                else if (provider == "custom" && options.CustomProviderEnabled)
+                    current = await FetchCustomAsync(options.EndpointTemplate, identity, options.TimeoutSeconds, cancellationToken)
+                        .ConfigureAwait(false);
 
                 if (current == null) continue;
                 var before = Clone(merged);
                 merged = Merge(merged, current);
-                if (Contributed(before, merged) && !string.IsNullOrWhiteSpace(current.Source))
-                    sources.Add(current.Source);
-
-                // Once both Emby-native marker groups are available, avoid unnecessary provider calls.
-                if (merged?.IntroStartSeconds.HasValue == true && merged.IntroEndSeconds.HasValue &&
-                    merged.CreditsStartSeconds.HasValue)
+                if (Contributed(before, merged) && !string.IsNullOrWhiteSpace(current.Source)) sources.Add(current.Source);
+                if (merged?.IntroStartSeconds.HasValue == true && merged.IntroEndSeconds.HasValue && merged.CreditsStartSeconds.HasValue)
                     break;
             }
 
@@ -143,13 +125,11 @@ namespace StrmAssistant.IntroSkip
                 merged.Source = string.Join(" + ", sources.Distinct(StringComparer.OrdinalIgnoreCase));
 
             if (options.CacheMinutes > 0)
-            {
                 Cache[cacheKey] = new CacheEntry
                 {
                     ExpiresUtc = DateTime.UtcNow.AddMinutes(options.CacheMinutes),
                     Document = Clone(merged)
                 };
-            }
             return Clone(merged);
         }
 
@@ -166,8 +146,7 @@ namespace StrmAssistant.IntroSkip
                 error = "Episode season/index identity is incomplete.";
                 return null;
             }
-            if (string.IsNullOrWhiteSpace(identity.SeriesTmdbId) &&
-                string.IsNullOrWhiteSpace(identity.SeriesImdbId))
+            if (string.IsNullOrWhiteSpace(identity.SeriesTmdbId) && string.IsNullOrWhiteSpace(identity.SeriesImdbId))
             {
                 error = "The parent Series has no TMDB or IMDb provider ID.";
                 return null;
@@ -213,7 +192,6 @@ namespace StrmAssistant.IntroSkip
                 BufferContent = true,
                 UserAgent = Plugin.Instance.UserAgent
             };
-
             try
             {
                 using var response = await _httpClient.SendAsync(request, "GET").ConfigureAwait(false);
@@ -224,10 +202,7 @@ namespace StrmAssistant.IntroSkip
                 if (document != null && !document.IntroConfidence.HasValue) document.IntroConfidence = document.Confidence;
                 return document;
             }
-            catch (OperationCanceledException)
-            {
-                return null;
-            }
+            catch (OperationCanceledException) { return null; }
             catch (Exception ex)
             {
                 if (Plugin.Instance?.DebugMode == true)
@@ -240,7 +215,6 @@ namespace StrmAssistant.IntroSkip
         {
             if (source == null) return target;
             target ??= new UnifiedIntroDbDocument();
-
             if (!target.IntroStartSeconds.HasValue && source.IntroStartSeconds.HasValue && source.IntroEndSeconds.HasValue)
             {
                 target.IntroStartSeconds = source.IntroStartSeconds;
@@ -272,10 +246,8 @@ namespace StrmAssistant.IntroSkip
 
         private static UnifiedIntroDbDocument Validate(UnifiedIntroDbDocument document, Episode episode)
         {
-            if (document == null) return null;
-            if (!document.IntroStartSeconds.HasValue || !document.IntroEndSeconds.HasValue ||
-                document.IntroStartSeconds.Value < 0 ||
-                document.IntroEndSeconds.Value <= document.IntroStartSeconds.Value)
+            if (document == null || !document.IntroStartSeconds.HasValue || !document.IntroEndSeconds.HasValue ||
+                document.IntroStartSeconds.Value < 0 || document.IntroEndSeconds.Value <= document.IntroStartSeconds.Value)
                 return null;
 
             var runtime = episode?.RunTimeTicks.HasValue == true
@@ -283,19 +255,25 @@ namespace StrmAssistant.IntroSkip
                 : (double?)null;
             if (runtime.HasValue && document.IntroEndSeconds.Value >= runtime.Value) return null;
 
-            ValidateOptionalRange(ref document.RecapStartSeconds, ref document.RecapEndSeconds, runtime);
-            ValidateOptionalRange(ref document.PreviewStartSeconds, ref document.PreviewEndSeconds, runtime);
+            NormalizeOptionalRange(document.RecapStartSeconds, document.RecapEndSeconds, runtime,
+                out var recapStart, out var recapEnd);
+            document.RecapStartSeconds = recapStart;
+            document.RecapEndSeconds = recapEnd;
+
+            NormalizeOptionalRange(document.PreviewStartSeconds, document.PreviewEndSeconds, runtime,
+                out var previewStart, out var previewEnd);
+            document.PreviewStartSeconds = previewStart;
+            document.PreviewEndSeconds = previewEnd;
 
             if (document.CreditsStartSeconds.HasValue &&
-                (document.CreditsStartSeconds.Value < 0 ||
-                 runtime.HasValue && document.CreditsStartSeconds.Value >= runtime.Value))
+                (document.CreditsStartSeconds.Value < 0 || runtime.HasValue && document.CreditsStartSeconds.Value >= runtime.Value))
             {
                 document.CreditsStartSeconds = null;
                 document.CreditsEndSeconds = null;
                 document.CreditsConfidence = null;
             }
-            else if (document.CreditsEndSeconds.HasValue &&
-                     (document.CreditsEndSeconds.Value <= document.CreditsStartSeconds ||
+            else if (document.CreditsStartSeconds.HasValue && document.CreditsEndSeconds.HasValue &&
+                     (document.CreditsEndSeconds.Value <= document.CreditsStartSeconds.Value ||
                       runtime.HasValue && document.CreditsEndSeconds.Value > runtime.Value))
             {
                 document.CreditsEndSeconds = null;
@@ -309,22 +287,16 @@ namespace StrmAssistant.IntroSkip
             return document;
         }
 
-        private static void ValidateOptionalRange(ref double? start, ref double? end, double? runtime)
+        private static void NormalizeOptionalRange(double? start, double? end, double? runtime,
+            out double? normalizedStart, out double? normalizedEnd)
         {
-            if (!end.HasValue)
-            {
-                start = null;
-                return;
-            }
-            var normalizedStart = start ?? 0;
-            if (normalizedStart < 0 || end.Value <= normalizedStart ||
-                runtime.HasValue && end.Value >= runtime.Value)
-            {
-                start = null;
-                end = null;
-                return;
-            }
-            start = normalizedStart;
+            normalizedStart = null;
+            normalizedEnd = null;
+            if (!end.HasValue) return;
+            var candidateStart = start ?? 0;
+            if (candidateStart < 0 || end.Value <= candidateStart || runtime.HasValue && end.Value >= runtime.Value) return;
+            normalizedStart = candidateStart;
+            normalizedEnd = end;
         }
 
         private static double? NormalizeConfidence(double? value)
@@ -339,10 +311,8 @@ namespace StrmAssistant.IntroSkip
         {
             if (after == null) return false;
             if (before == null) return true;
-            return before.IntroStartSeconds != after.IntroStartSeconds ||
-                   before.IntroEndSeconds != after.IntroEndSeconds ||
-                   before.CreditsStartSeconds != after.CreditsStartSeconds ||
-                   before.RecapEndSeconds != after.RecapEndSeconds ||
+            return before.IntroStartSeconds != after.IntroStartSeconds || before.IntroEndSeconds != after.IntroEndSeconds ||
+                   before.CreditsStartSeconds != after.CreditsStartSeconds || before.RecapEndSeconds != after.RecapEndSeconds ||
                    before.PreviewStartSeconds != after.PreviewStartSeconds;
         }
 
@@ -357,8 +327,7 @@ namespace StrmAssistant.IntroSkip
                 else if (item == "theintrodb" || item == "tidb") item = "theintrodb";
                 if (known.Contains(item) && !result.Contains(item)) result.Add(item);
             }
-            foreach (var item in known)
-                if (!result.Contains(item)) result.Add(item);
+            foreach (var item in known) if (!result.Contains(item)) result.Add(item);
             return result;
         }
 
@@ -370,10 +339,8 @@ namespace StrmAssistant.IntroSkip
                 identity.SeriesImdbId ?? string.Empty,
                 identity.SeasonNumber?.ToString() ?? string.Empty,
                 identity.EpisodeNumber?.ToString() ?? string.Empty,
-                options.IntroDbAppEnabled.ToString(),
-                options.TheIntroDbEnabled.ToString(),
-                options.CustomProviderEnabled.ToString(),
-                options.ProviderOrder ?? string.Empty,
+                options.IntroDbAppEnabled.ToString(), options.TheIntroDbEnabled.ToString(),
+                options.CustomProviderEnabled.ToString(), options.ProviderOrder ?? string.Empty,
                 options.EndpointTemplate ?? string.Empty
             });
         }
@@ -383,21 +350,13 @@ namespace StrmAssistant.IntroSkip
             if (value == null) return null;
             return new UnifiedIntroDbDocument
             {
-                IntroStartSeconds = value.IntroStartSeconds,
-                IntroEndSeconds = value.IntroEndSeconds,
-                IntroConfidence = value.IntroConfidence,
-                RecapStartSeconds = value.RecapStartSeconds,
-                RecapEndSeconds = value.RecapEndSeconds,
-                RecapConfidence = value.RecapConfidence,
-                CreditsStartSeconds = value.CreditsStartSeconds,
-                CreditsEndSeconds = value.CreditsEndSeconds,
-                CreditsConfidence = value.CreditsConfidence,
-                PreviewStartSeconds = value.PreviewStartSeconds,
-                PreviewEndSeconds = value.PreviewEndSeconds,
-                PreviewConfidence = value.PreviewConfidence,
-                Confidence = value.Confidence,
-                Source = value.Source,
-                ExternalId = value.ExternalId
+                IntroStartSeconds = value.IntroStartSeconds, IntroEndSeconds = value.IntroEndSeconds,
+                IntroConfidence = value.IntroConfidence, RecapStartSeconds = value.RecapStartSeconds,
+                RecapEndSeconds = value.RecapEndSeconds, RecapConfidence = value.RecapConfidence,
+                CreditsStartSeconds = value.CreditsStartSeconds, CreditsEndSeconds = value.CreditsEndSeconds,
+                CreditsConfidence = value.CreditsConfidence, PreviewStartSeconds = value.PreviewStartSeconds,
+                PreviewEndSeconds = value.PreviewEndSeconds, PreviewConfidence = value.PreviewConfidence,
+                Confidence = value.Confidence, Source = value.Source, ExternalId = value.ExternalId
             };
         }
 
@@ -406,9 +365,6 @@ namespace StrmAssistant.IntroSkip
             try { return item?.GetProviderId(key); } catch { return null; }
         }
 
-        private static string Escape(string value)
-        {
-            return Uri.EscapeDataString(value ?? string.Empty);
-        }
+        private static string Escape(string value) => Uri.EscapeDataString(value ?? string.Empty);
     }
 }
