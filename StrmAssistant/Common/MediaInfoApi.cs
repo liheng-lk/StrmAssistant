@@ -62,13 +62,20 @@ namespace StrmAssistant.Common
                 try
                 {
                     _getStaticMediaSources = mediaSourceManager.GetType()
-                        .GetMethod("GetStaticMediaSources",
-                            new[]
-                            {
-                                typeof(BaseItem), typeof(bool), typeof(bool), typeof(bool), typeof(LibraryOptions),
-                                typeof(DeviceProfile), typeof(User)
-                            });
-                    _fallbackApproach = true;
+                        .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                        .Where(method => string.Equals(method.Name, "GetStaticMediaSources", StringComparison.Ordinal))
+                        .OrderByDescending(method => method.GetParameters().Length)
+                        .FirstOrDefault(method =>
+                        {
+                            var parameters = method.GetParameters();
+                            return parameters.Length >= 7 &&
+                                   parameters[0].ParameterType == typeof(BaseItem) &&
+                                   parameters.Any(parameter => parameter.ParameterType == typeof(LibraryOptions));
+                        });
+                    _fallbackApproach = _getStaticMediaSources != null;
+
+                    if (Plugin.Instance.DebugMode && _getStaticMediaSources != null)
+                        _logger.Debug("MediaInfoApi runtime GetStaticMediaSources: " + _getStaticMediaSources);
                 }
                 catch (Exception e)
                 {
@@ -78,25 +85,20 @@ namespace StrmAssistant.Common
                         _logger.Debug(e.StackTrace);
                     }
                 }
-
-                if (_getStaticMediaSources is null)
-                {
-                    _logger.Warn($"{nameof(MediaInfoApi)} Init Failed");
-                }
             }
 
             try
             {
-                var embyServerImplementationsAssembly = Assembly.Load("Emby.Server.Implementations");
+                var embyServerImplementationsAssembly = TryLoadAssembly("Emby.Server.Implementations");
                 var libraryMonitorImpl =
-                    embyServerImplementationsAssembly.GetType("Emby.Server.Implementations.IO.LibraryMonitor");
-                var alwaysIgnoreExtensions = libraryMonitorImpl.GetField("_alwaysIgnoreExtensions",
-                    BindingFlags.Instance | BindingFlags.NonPublic);
-                var currentArray = (string[])alwaysIgnoreExtensions.GetValue(libraryMonitor);
-                var newArray = new string[currentArray.Length + 1];
-                Array.Copy(currentArray, newArray, currentArray.Length);
-                newArray[newArray.Length - 1] = ".json";
-                alwaysIgnoreExtensions.SetValue(libraryMonitor, newArray);
+                    embyServerImplementationsAssembly?.GetType("Emby.Server.Implementations.IO.LibraryMonitor");
+
+                if (!TryAppendStringArrayField(libraryMonitorImpl, libraryMonitor,
+                        "_alwaysIgnoreExtensions", ".json"))
+                {
+                    TryAppendStringArrayField(libraryMonitorImpl, libraryMonitor,
+                        "_alwaysIgnoreSubstrings", MediaInfoFileExtension);
+                }
             }
             catch (Exception e)
             {
@@ -105,9 +107,36 @@ namespace StrmAssistant.Common
                     _logger.Debug(e.Message);
                     _logger.Debug(e.StackTrace);
                 }
-
-                _logger.Warn($"{nameof(MediaInfoApi)} Init Failed");
             }
+        }
+
+        private static Assembly TryLoadAssembly(string name)
+        {
+            try
+            {
+                return Assembly.Load(name);
+            }
+            catch
+            {
+                return AppDomain.CurrentDomain.GetAssemblies()
+                    .FirstOrDefault(assembly =>
+                        string.Equals(assembly.GetName().Name, name, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        private static bool TryAppendStringArrayField(Type targetType, object target, string fieldName, string value)
+        {
+            if (targetType == null || target == null || string.IsNullOrWhiteSpace(value)) return false;
+
+            var field = targetType.GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+            if (!(field?.GetValue(target) is string[] currentArray)) return false;
+            if (currentArray.Any(item => string.Equals(item, value, StringComparison.OrdinalIgnoreCase))) return true;
+
+            var newArray = new string[currentArray.Length + 1];
+            Array.Copy(currentArray, newArray, currentArray.Length);
+            newArray[newArray.Length - 1] = value;
+            field.SetValue(target, newArray);
+            return true;
         }
 
         private List<MediaSourceInfo> GetStaticMediaSourcesByApi(BaseItem item, bool enableAlternateMediaSources,
@@ -120,8 +149,46 @@ namespace StrmAssistant.Common
         private List<MediaSourceInfo> GetStaticMediaSourcesByRef(BaseItem item, bool enableAlternateMediaSources,
             LibraryOptions libraryOptions)
         {
-            return (List<MediaSourceInfo>)_getStaticMediaSources.Invoke(_mediaSourceManager,
-                new object[] { item, enableAlternateMediaSources, false, false, libraryOptions, null, null });
+            if (_getStaticMediaSources == null)
+                return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
+
+            var parameters = _getStaticMediaSources.GetParameters();
+            var collectionFolders = _libraryManager.GetCollectionFolders(item)?.ToArray() ?? Array.Empty<BaseItem>();
+            object[] args;
+
+            switch (parameters.Length)
+            {
+                case 10:
+                    args = new object[]
+                    {
+                        item, enableAlternateMediaSources, false, true, true, collectionFolders,
+                        libraryOptions, null, null, CancellationToken.None
+                    };
+                    break;
+                case 8:
+                    args = new object[]
+                    {
+                        item, enableAlternateMediaSources, false, true, collectionFolders,
+                        libraryOptions, null, null
+                    };
+                    break;
+                case 7:
+                    args = new object[]
+                    {
+                        item, enableAlternateMediaSources, false, true, libraryOptions, null, null
+                    };
+                    break;
+                default:
+                    if (Plugin.Instance.DebugMode)
+                        _logger.Debug("MediaInfoApi unsupported runtime GetStaticMediaSources signature: " +
+                                      _getStaticMediaSources);
+                    return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
+            }
+
+            var result = _getStaticMediaSources.Invoke(_mediaSourceManager, args);
+            if (result is List<MediaSourceInfo> list) return list;
+            if (result is IEnumerable<MediaSourceInfo> enumerable) return enumerable.ToList();
+            return new List<MediaSourceInfo>();
         }
 
         public List<MediaSourceInfo> GetStaticMediaSources(BaseItem item, bool enableAlternateMediaSources)
@@ -437,7 +504,6 @@ namespace StrmAssistant.Common
                         chapters.Add(introStart);
                         chapters.Add(introEnd);
                         chapters.Sort((c1, c2) => c1.StartPositionTicks.CompareTo(c2.StartPositionTicks));
-
                         _itemRepository.SaveChapters(item.InternalId, chapters);
 
                         _logger.Info("ChapterInfoPersist - Deserialization Success (" + source + "): " + mediaInfoJsonPath);
