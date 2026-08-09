@@ -54,5 +54,43 @@ namespace StrmAssistant.Options
         [DescriptionL("GeneralOptions_Tier2MaxConcurrentCount_Refresh_metadata__subtitle__local_tasks__Default_is_1_", typeof(Resources))]
         [Required, MinValue(1), MaxValue(20)]
         public int Tier2MaxConcurrentCount { get; set; } = 1;
+
+        public enum ProxyRoutingMode
+        {
+            [Description("全部公网请求")]
+            Global,
+            [Description("仅指定域名/刮削器")]
+            Whitelist
+        }
+
+        [DisplayName("代理服务器增强（实验）")]
+        [Description("为 Emby 新建的 HTTP handler 注入代理。默认关闭；不会修改系统代理。建议先使用白名单模式，仅让 TMDB/TVDB 等指定域名走代理。")]
+        [Required]
+        public bool EnableProxyServerEnhance { get; set; } = false;
+
+        [DisplayName("代理地址")]
+        [Description("HTTP/HTTPS 代理 URL，例如 http://127.0.0.1:7890。支持 URL 中的用户名/密码。")]
+        [VisibleCondition(nameof(EnableProxyServerEnhance), SimpleCondition.IsTrue)]
+        public string ProxyServerUrl { get; set; } = string.Empty;
+
+        [DisplayName("代理模式")]
+        [Description("Global：除本地/私网地址外均走代理；Whitelist：仅下方域名命中时走代理。")]
+        [VisibleCondition(nameof(EnableProxyServerEnhance), SimpleCondition.IsTrue)]
+        public ProxyRoutingMode ProxyMode { get; set; } = ProxyRoutingMode.Whitelist;
+
+        [DisplayName("代理域名白名单")]
+        [Description("逗号、分号或换行分隔，可填 api.themoviedb.org、thetvdb.com 或 *.themoviedb.org。Whitelist 模式下只有命中项走代理。")]
+        [VisibleCondition(nameof(EnableProxyServerEnhance), SimpleCondition.IsTrue)]
+        public string ProxyWhitelistDomains { get; set; } = "*.themoviedb.org,*.tmdb.org,*.thetvdb.com";
+
+        [DisplayName("额外直连地址")]
+        [Description("逗号、分号或换行分隔。除 RFC1918/localhost 外额外强制直连的主机/IP，可用于 NAS、反代、局域网服务。")]
+        [VisibleCondition(nameof(EnableProxyServerEnhance), SimpleCondition.IsTrue)]
+        public string ProxyBypassHosts { get; set; } = string.Empty;
+
+        [DisplayName("本地发现/回源地址")]
+        [Description("可选。填写 Emby/NAS 在本地网络中使用的主机名或 IP；该地址始终直连，不经过代理。此项只影响本插件代理路由，不修改 Emby 的公网地址配置。")]
+        [VisibleCondition(nameof(EnableProxyServerEnhance), SimpleCondition.IsTrue)]
+        public string ProxyLocalDiscoveryAddress { get; set; } = string.Empty;
     }
 }
