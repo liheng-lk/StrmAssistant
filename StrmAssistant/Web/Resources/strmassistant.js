@@ -36,6 +36,108 @@
         return lines.join('\n');
     }
 
+    function getMaintenanceLabel(kind) {
+        const locale = globalize.getCurrentLocale().toLowerCase();
+        if (kind === 'ThumbnailCache') {
+            return locale === 'zh-cn' ? '清除章节图/BIF缓存' :
+                (['zh-hk', 'zh-tw'].includes(locale) ? '清除章節圖/BIF快取' : 'Clear Chapter/BIF Cache');
+        }
+        return locale === 'zh-cn' ? '清除媒体信息' :
+            (['zh-hk', 'zh-tw'].includes(locale) ? '清除媒體資訊' : 'Clear MediaInfo');
+    }
+
+    function formatMaintenancePlan(plan, kind) {
+        const lines = [];
+        if (plan.ItemName) lines.push(plan.ItemName);
+        if (plan.ItemPath) lines.push(plan.ItemPath);
+        lines.push('');
+
+        if (kind === 'ThumbnailCache') {
+            lines.push(`Chapters: ${plan.ChapterCount || 0}`);
+            lines.push(`Chapter image references: ${plan.ChapterImageReferenceCount || 0}`);
+        } else {
+            lines.push(`Media streams: ${plan.MediaStreamCount || 0}`);
+            if (plan.PersistedMediaInfoJson) lines.push(`Persisted JSON: ${plan.PersistedMediaInfoJson}`);
+        }
+
+        const paths = plan.Paths || [];
+        if (paths.length) {
+            lines.push('');
+            lines.push('Paths:');
+            paths.slice(0, 30).forEach(path => lines.push('- ' + path));
+            if (paths.length > 30) lines.push(`... +${paths.length - 30}`);
+        }
+
+        const warnings = plan.Warnings || [];
+        if (warnings.length) {
+            lines.push('');
+            lines.push('Warnings:');
+            warnings.forEach(value => lines.push('- ' + value));
+        }
+
+        return lines.join('\n');
+    }
+
+    function runMaintenance(itemId, itemName, kind) {
+        const apiClient = connectionManager.currentApiClient();
+        const label = getMaintenanceLabel(kind);
+        const planApi = apiClient.getUrl(`StrmAssistant/Maintenance/${itemId}/${kind}/Plan`);
+
+        loading.show();
+        return apiClient.ajax({
+            type: 'GET',
+            url: planApi,
+            dataType: 'json'
+        }).then(plan => {
+            loading.hide();
+            if (!plan || plan.Success === false || (plan.Errors && plan.Errors.length)) {
+                toast(plan?.Errors?.join('\n') || label + ' plan failed');
+                return;
+            }
+
+            return confirm({
+                text: formatMaintenancePlan(plan, kind),
+                title: label + ' - ' + (itemName || ''),
+                confirmText: globalize.translate('Clear'),
+                primary: 'cancel'
+            }).then(function () {
+                loading.show();
+                let executeApi = apiClient.getUrl(`StrmAssistant/Maintenance/${itemId}/${kind}/Clear`);
+                executeApi += '?Confirm=true';
+                if (kind === 'MediaInfo') executeApi += '&DeletePersistedJson=true';
+
+                return apiClient.ajax({
+                    type: 'POST',
+                    url: executeApi,
+                    data: {},
+                    dataType: 'json',
+                    contentType: 'application/json'
+                }).then(result => {
+                    loading.hide();
+                    if (!result) {
+                        toast(label + ' failed');
+                        return;
+                    }
+                    if (result.Errors && result.Errors.length) {
+                        toast(result.Errors.join('\n'));
+                        return;
+                    }
+                    if (result.Success && result.Executed) {
+                        toast(label + ' Success');
+                    } else {
+                        toast((result.Warnings || []).join('\n') || label + ' not executed');
+                    }
+                }).catch(error => {
+                    loading.hide();
+                    toast(error?.message || label + ' failed');
+                });
+            });
+        }).catch(error => {
+            loading.hide();
+            toast(error?.message || label + ' plan failed');
+        });
+    }
+
     return {
         copy: function (libraryId) {
             loading.show();
@@ -168,6 +270,14 @@
                 loading.hide();
                 toast(error?.message || label + ' plan failed');
             });
+        },
+
+        clear_thumbnails: function (itemId, itemName) {
+            return runMaintenance(itemId, itemName, 'ThumbnailCache');
+        },
+
+        clear_mediainfo: function (itemId, itemName) {
+            return runMaintenance(itemId, itemName, 'MediaInfo');
         },
 
         traverse: function (itemId) {
