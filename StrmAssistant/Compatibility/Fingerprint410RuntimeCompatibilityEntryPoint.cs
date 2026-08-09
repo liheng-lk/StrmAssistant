@@ -1,10 +1,17 @@
 using HarmonyLib;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.IO;
 using StrmAssistant.Common;
+using StrmAssistant.MediaEnhance;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -29,10 +36,11 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// Adapts the wrapper around Emby's internal AudioFingerprintManager without replacing
-    /// Strm Assistant's native/distributed fingerprint routing. Emby 4.10 changed the concrete
-    /// Task result type returned by GetAllFingerprintFilesForSeason and added a CancellationToken
-    /// to UpdateSequencesForSeason on newer builds.
+    /// Emby 4.10 changed the concrete Task result returned by
+    /// AudioFingerprintManager.GetAllFingerprintFilesForSeason and newer builds add a
+    /// CancellationToken to UpdateSequencesForSeason. Patching the old private wrapper methods
+    /// is unsafe because their exception filters can make Harmony fail IL generation. Instead,
+    /// intercept the public season workflow and invoke Emby's runtime methods directly.
     /// </summary>
     public sealed class Fingerprint410RuntimeCompatibilityEntryPoint : IServerEntryPoint
     {
@@ -47,40 +55,43 @@ namespace StrmAssistant.Compatibility
             try
             {
                 var flags = BindingFlags.Instance | BindingFlags.NonPublic;
-                var seasonTarget = typeof(FingerprintApi).GetMethod(
-                    "GetAllFingerprintFilesForSeason", flags);
-                var updateTarget = typeof(FingerprintApi).GetMethod(
-                    "UpdateSequencesForSeason", flags);
-
-                status.SeasonFingerprintTargetFound = seasonTarget != null;
-                status.UpdateSequenceTargetFound = updateTarget != null;
-
                 var nativeSeasonMethod = typeof(FingerprintApi).GetField(
                     "_getAllFingerprintFilesForSeason", flags)?.GetValue(Plugin.FingerprintApi) as MethodInfo;
                 var nativeUpdateMethod = typeof(FingerprintApi).GetField(
                     "_updateSequencesForSeason", flags)?.GetValue(Plugin.FingerprintApi) as MethodInfo;
+
+                status.SeasonFingerprintTargetFound = nativeSeasonMethod != null;
+                status.UpdateSequenceTargetFound = nativeUpdateMethod != null;
                 status.NativeSeasonFingerprintParameterCount = nativeSeasonMethod?.GetParameters().Length ?? 0;
                 status.NativeUpdateSequenceParameterCount = nativeUpdateMethod?.GetParameters().Length ?? 0;
 
+                if (nativeSeasonMethod == null || nativeUpdateMethod == null)
+                {
+                    status.Error = "Emby AudioFingerprintManager runtime methods were not found.";
+                    return;
+                }
+
+                var target = typeof(FingerprintApi).GetMethod(
+                    "UpdateIntroMarkerForSeason",
+                    BindingFlags.Instance | BindingFlags.Public,
+                    null,
+                    new[] { typeof(Season), typeof(CancellationToken), typeof(IProgress<double>) },
+                    null);
+
+                if (target == null)
+                {
+                    status.Error = "FingerprintApi.UpdateIntroMarkerForSeason runtime entry was not found.";
+                    return;
+                }
+
+                var prefix = typeof(Fingerprint410Patches).GetMethod(
+                    nameof(Fingerprint410Patches.UpdateIntroMarkerForSeasonPrefix),
+                    BindingFlags.Static | BindingFlags.Public);
+
                 _harmony = new Harmony(HarmonyId);
-
-                if (seasonTarget != null)
-                {
-                    var prefix = typeof(Fingerprint410Patches).GetMethod(
-                        nameof(Fingerprint410Patches.GetAllFingerprintFilesForSeasonPrefix),
-                        BindingFlags.Static | BindingFlags.Public);
-                    _harmony.Patch(seasonTarget, prefix: new HarmonyMethod(prefix));
-                    status.SeasonFingerprintPatched = true;
-                }
-
-                if (updateTarget != null)
-                {
-                    var prefix = typeof(Fingerprint410Patches).GetMethod(
-                        nameof(Fingerprint410Patches.UpdateSequencesForSeasonPrefix),
-                        BindingFlags.Static | BindingFlags.Public);
-                    _harmony.Patch(updateTarget, prefix: new HarmonyMethod(prefix));
-                    status.UpdateSequencePatched = true;
-                }
+                _harmony.Patch(target, prefix: new HarmonyMethod(prefix));
+                status.SeasonFingerprintPatched = true;
+                status.UpdateSequencePatched = true;
             }
             catch (Exception ex)
             {
@@ -97,96 +108,189 @@ namespace StrmAssistant.Compatibility
 
     public static class Fingerprint410Patches
     {
-        public static bool GetAllFingerprintFilesForSeasonPrefix(
+        public static bool UpdateIntroMarkerForSeasonPrefix(
             FingerprintApi __instance,
+            Season season,
+            CancellationToken cancellationToken,
+            IProgress<double> progress,
+            ref Task __result)
+        {
+            __result = RunCompatibleSeasonWorkflowAsync(__instance, season, cancellationToken, progress);
+            return false;
+        }
+
+        private static async Task RunCompatibleSeasonWorkflowAsync(
+            FingerprintApi instance,
+            Season season,
+            CancellationToken cancellationToken,
+            IProgress<double> progress)
+        {
+            if (instance == null || season == null) return;
+
+            var libraryManager = GetPrivateField<ILibraryManager>(instance, "_libraryManager");
+            var fileSystem = GetPrivateField<IFileSystem>(instance, "_fileSystem");
+            var nativeManager = GetPrivateField<object>(instance, "_audioFingerprintManager");
+            var getAllMethod = GetPrivateField<MethodInfo>(instance, "_getAllFingerprintFilesForSeason");
+            var updateMethod = GetPrivateField<MethodInfo>(instance, "_updateSequencesForSeason");
+
+            if (libraryManager == null || fileSystem == null || nativeManager == null ||
+                getAllMethod == null || updateMethod == null)
+                throw new InvalidOperationException("Fingerprint runtime dependencies could not be resolved.");
+
+            var fingerprintMinutes = instance.GetFingerprintMinutes(season);
+            var libraryOptions = libraryManager.GetLibraryOptions(season);
+            libraryOptions.IntroDetectionFingerprintLength = fingerprintMinutes;
+            var directoryService = new DirectoryService(Plugin.Instance.Logger, fileSystem);
+
+            var episodeQuery = new InternalItemsQuery
+            {
+                GroupByPresentationUniqueKey = false,
+                EnableTotalRecordCount = false,
+                MinRunTimeTicks = TimeSpan.FromMinutes(fingerprintMinutes).Ticks,
+                HasIntroDetectionFailure = false,
+                HasAudioStream = true
+            };
+
+            var allEpisodes = MediaExtractionFilter.Apply(
+                    season.GetEpisodes(episodeQuery).Items.OfType<Episode>())
+                .ToArray();
+
+            episodeQuery.WithoutChapterMarkers = new[] { MarkerType.IntroStart };
+            var episodesWithoutMarkers = MediaExtractionFilter.Apply(
+                    season.GetEpisodes(episodeQuery).Items.OfType<Episode>())
+                .ToList();
+
+            var manager = SelectFingerprintManager(instance, allEpisodes, out var distributed) ?? nativeManager;
+
+            try
+            {
+                await RunWithManagerAsync(manager, season, allEpisodes, episodesWithoutMarkers,
+                        libraryOptions, directoryService, getAllMethod, updateMethod, cancellationToken, progress)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (distributed && ShouldFallbackToNative())
+            {
+                Plugin.Instance?.Logger?.Warn(
+                    "IntroFingerprintExtract - 4.10 distributed season workflow failed for {0}; falling back to Emby native ffmpeg. {1}",
+                    season.Path, ex.Message);
+
+                await RunWithManagerAsync(nativeManager, season, allEpisodes, episodesWithoutMarkers,
+                        libraryOptions, directoryService, getAllMethod, updateMethod, cancellationToken, progress)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        private static async Task RunWithManagerAsync(
             object manager,
             Season season,
-            Episode[] episodes,
+            Episode[] allEpisodes,
+            IList<Episode> episodesWithoutMarkers,
             LibraryOptions libraryOptions,
             IDirectoryService directoryService,
+            MethodInfo getAllMethod,
+            MethodInfo updateMethod,
             CancellationToken cancellationToken,
-            ref Task<object> __result)
+            IProgress<double> progress)
         {
+            object invoked;
             try
             {
-                var nativeMethod = typeof(FingerprintApi).GetField(
-                    "_getAllFingerprintFilesForSeason",
-                    BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(__instance) as MethodInfo;
-
-                if (nativeMethod == null || manager == null)
-                    return true;
-
-                var invoked = nativeMethod.Invoke(manager,
-                    new object[] { season, episodes, libraryOptions, directoryService, cancellationToken });
-
-                if (!(invoked is Task task))
-                    return true;
-
-                __result = AwaitTaskResultAsync(task);
-                return false;
-            }
-            catch (TargetInvocationException ex) when (ex.InnerException != null)
-            {
-                __result = Task.FromException<object>(ex.InnerException);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                __result = Task.FromException<object>(ex);
-                return false;
-            }
-        }
-
-        private static async Task<object> AwaitTaskResultAsync(Task task)
-        {
-            await task.ConfigureAwait(false);
-            return task.GetType().GetProperty("Result", BindingFlags.Instance | BindingFlags.Public)
-                ?.GetValue(task);
-        }
-
-        public static bool UpdateSequencesForSeasonPrefix(
-            FingerprintApi __instance,
-            object manager,
-            Season season,
-            object seasonFingerprintInfo,
-            Episode episode,
-            LibraryOptions libraryOptions,
-            IDirectoryService directoryService)
-        {
-            var nativeMethod = typeof(FingerprintApi).GetField(
-                "_updateSequencesForSeason",
-                BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(__instance) as MethodInfo;
-
-            if (nativeMethod == null || manager == null)
-                return true;
-
-            try
-            {
-                var parameterCount = nativeMethod.GetParameters().Length;
-                object[] args;
-                if (parameterCount >= 6)
-                {
-                    args = new object[]
+                invoked = getAllMethod.Invoke(manager,
+                    new object[]
                     {
-                        season, seasonFingerprintInfo, episode, libraryOptions, directoryService,
-                        CancellationToken.None
-                    };
-                }
-                else
-                {
-                    args = new object[]
-                    {
-                        season, seasonFingerprintInfo, episode, libraryOptions, directoryService
-                    };
-                }
-
-                nativeMethod.Invoke(manager, args);
-                return false;
+                        season, allEpisodes, libraryOptions, directoryService, cancellationToken
+                    });
             }
             catch (TargetInvocationException ex) when (ex.InnerException != null)
             {
                 throw ex.InnerException;
             }
+
+            if (!(invoked is Task task))
+                throw new InvalidOperationException("GetAllFingerprintFilesForSeason did not return Task.");
+
+            await task.ConfigureAwait(false);
+            var seasonFingerprintInfo = task.GetType()
+                .GetProperty("Result", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(task);
+
+            double total = episodesWithoutMarkers.Count;
+            var index = 0;
+
+            foreach (var episode in episodesWithoutMarkers)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var parameterCount = updateMethod.GetParameters().Length;
+                var args = parameterCount >= 6
+                    ? new object[]
+                    {
+                        season, seasonFingerprintInfo, episode, libraryOptions, directoryService, cancellationToken
+                    }
+                    : new object[]
+                    {
+                        season, seasonFingerprintInfo, episode, libraryOptions, directoryService
+                    };
+
+                try
+                {
+                    updateMethod.Invoke(manager, args);
+                }
+                catch (TargetInvocationException ex) when (ex.InnerException != null)
+                {
+                    throw ex.InnerException;
+                }
+
+                index++;
+                progress?.Report(total == 0 ? 1.0 : index / total);
+            }
+
+            progress?.Report(1.0);
+        }
+
+        private static object SelectFingerprintManager(FingerprintApi instance, Episode[] episodes,
+            out bool distributed)
+        {
+            distributed = false;
+            try
+            {
+                var method = typeof(FingerprintApi)
+                    .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+                    .FirstOrDefault(candidate =>
+                    {
+                        if (!string.Equals(candidate.Name, "SelectFingerprintManager", StringComparison.Ordinal))
+                            return false;
+                        var parameters = candidate.GetParameters();
+                        return parameters.Length == 2 &&
+                               parameters[0].ParameterType == typeof(IEnumerable<Episode>) &&
+                               parameters[1].ParameterType == typeof(bool).MakeByRefType();
+                    });
+
+                if (method == null) return null;
+                var args = new object[] { episodes, false };
+                var manager = method.Invoke(instance, args);
+                if (args[1] is bool value) distributed = value;
+                return manager;
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                throw ex.InnerException;
+            }
+        }
+
+        private static bool ShouldFallbackToNative()
+        {
+            return Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions?.DistributedFingerprintFallbackToEmby != false;
+        }
+
+        private static T GetPrivateField<T>(object target, string fieldName) where T : class
+        {
+            return target?.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.GetValue(target) as T;
         }
     }
 }
