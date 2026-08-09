@@ -180,13 +180,19 @@ namespace StrmAssistant.Common
             }
         }
 
-        private Task<object> GetAllFingerprintFilesForSeason(object manager, Season season, Episode[] episodes,
+        private async Task<object> GetAllFingerprintFilesForSeason(object manager, Season season, Episode[] episodes,
             LibraryOptions libraryOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
             try
             {
-                return (Task<object>)_getAllFingerprintFilesForSeason.Invoke(manager,
+                var invoked = _getAllFingerprintFilesForSeason.Invoke(manager,
                     new object[] { season, episodes, libraryOptions, directoryService, cancellationToken });
+                if (!(invoked is Task task))
+                    throw new InvalidOperationException("GetAllFingerprintFilesForSeason did not return Task.");
+
+                await task.ConfigureAwait(false);
+                return task.GetType().GetProperty("Result", BindingFlags.Instance | BindingFlags.Public)
+                    ?.GetValue(task);
             }
             catch (TargetInvocationException ex) when (ex.InnerException != null)
             {
@@ -195,12 +201,23 @@ namespace StrmAssistant.Common
         }
 
         private void UpdateSequencesForSeason(object manager, Season season, object seasonFingerprintInfo,
-            Episode episode, LibraryOptions libraryOptions, IDirectoryService directoryService)
+            Episode episode, LibraryOptions libraryOptions, IDirectoryService directoryService,
+            CancellationToken cancellationToken)
         {
             try
             {
-                _updateSequencesForSeason.Invoke(manager,
-                    new[] { season, seasonFingerprintInfo, episode, libraryOptions, directoryService });
+                var parameters = _updateSequencesForSeason.GetParameters();
+                var args = parameters.Length >= 6
+                    ? new object[]
+                    {
+                        season, seasonFingerprintInfo, episode, libraryOptions, directoryService, cancellationToken
+                    }
+                    : new object[]
+                    {
+                        season, seasonFingerprintInfo, episode, libraryOptions, directoryService
+                    };
+
+                _updateSequencesForSeason.Invoke(manager, args);
             }
             catch (TargetInvocationException ex) when (ex.InnerException != null)
             {
@@ -745,7 +762,7 @@ namespace StrmAssistant.Common
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 UpdateSequencesForSeason(manager, season, seasonFingerprintInfo, episode, libraryOptions,
-                    directoryService);
+                    directoryService, cancellationToken);
 
                 index++;
                 progress?.Report(total == 0 ? 1.0 : index / total);
