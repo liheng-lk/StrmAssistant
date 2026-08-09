@@ -207,6 +207,23 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(PersistMediaInfoMode), ValueCondition.IsNotEqual, PersistMediaInfoOption.None)]
         public string MediaInfoJsonRootFolder { get; set; } = string.Empty;
 
+        [DisplayName("共享 MediaInfo 同步")]
+        [Description("启用管理员 Status/Export/Import 同步接口。同步只读写配置的 JSON 根目录，不连接或修改另一台 Emby 的数据库。")]
+        [Required]
+        [VisibleCondition(nameof(PersistMediaInfoMode), ValueCondition.IsNotEqual, PersistMediaInfoOption.None)]
+        public bool EnableMediaInfoSharedSync { get; set; } = false;
+
+        [DisplayName("共享同步路径映射")]
+        [Description("每行一条：本机媒体根目录 => 逻辑根目录。例如 /mnt/media/movies => movies。另一台服务器可用 D:\\Media\\Movies => movies，从而生成相同 Sync Key。最长匹配根目录优先。")]
+        [VisibleCondition(nameof(EnableMediaInfoSharedSync), SimpleCondition.IsTrue)]
+        public string MediaInfoSyncPathMappings { get; set; } = string.Empty;
+
+        [DisplayName("共享同步必须命中路径映射")]
+        [Description("建议开启。开启后只有媒体路径命中上方映射时才允许 Export/Import，避免 Linux/Windows 不同绝对路径生成不同 Key。关闭后未命中时退回旧的文件系统根目录相对路径。")]
+        [Required]
+        [VisibleCondition(nameof(EnableMediaInfoSharedSync), SimpleCondition.IsTrue)]
+        public bool MediaInfoSyncRequireMappedPath { get; set; } = true;
+
         [Browsable(false)]
         public IEnumerable<EditorSelectOption> LibraryList { get; set; }
 
