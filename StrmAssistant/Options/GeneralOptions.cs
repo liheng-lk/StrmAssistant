@@ -55,6 +55,17 @@ namespace StrmAssistant.Options
         [Required, MinValue(1), MaxValue(20)]
         public int Tier2MaxConcurrentCount { get; set; } = 1;
 
+        [DisplayName("中文搜索增强（兼容模式）")]
+        [Description("默认关闭。仅扩展 Emby 自身生成的 FTS SearchTerm，不重建数据库或加载第三方 SQLite tokenizer。目标方法不可用时自动退回 Emby 原生搜索。")]
+        [Required]
+        public bool EnableChineseSearchEnhance { get; set; } = false;
+
+        [DisplayName("简繁体混合搜索")]
+        [Description("保留原始查询，并同时加入简体/繁体等价查询。例如繁体标题可用简体关键词搜索，反之亦然。不会修改媒体标题或数据库内容。")]
+        [Required]
+        [VisibleCondition(nameof(EnableChineseSearchEnhance), SimpleCondition.IsTrue)]
+        public bool EnableSimplifiedTraditionalSearch { get; set; } = true;
+
         public enum ProxyRoutingMode
         {
             [Description("全部公网请求")]
