@@ -83,7 +83,8 @@ namespace StrmAssistant.IntroSkip
 
                 var document = await _bridge.FetchAsync(episode, cancellationToken).ConfigureAwait(false);
                 if (document == null) return;
-                if (document.Confidence.HasValue && document.Confidence.Value < options.MinimumConfidence) return;
+                var introConfidence = document.IntroConfidence ?? document.Confidence;
+                if (introConfidence.HasValue && introConfidence.Value < options.MinimumConfidence) return;
 
                 if (options.OverwriteExistingMarkers)
                     chapters.RemoveAll(c => markerTypes.Contains(c.MarkerType));
@@ -92,7 +93,10 @@ namespace StrmAssistant.IntroSkip
                     document.IntroStartSeconds.Value, options.OverwriteExistingMarkers);
                 AddMarkerIfNeeded(chapters, existingMarkerTypes, MarkerType.IntroEnd,
                     document.IntroEndSeconds.Value, options.OverwriteExistingMarkers);
-                if (options.AllowCreditsMarker && document.CreditsStartSeconds.HasValue)
+
+                var creditsConfidenceOk = !document.CreditsConfidence.HasValue ||
+                                          document.CreditsConfidence.Value >= options.MinimumConfidence;
+                if (options.AllowCreditsMarker && document.CreditsStartSeconds.HasValue && creditsConfidenceOk)
                     AddMarkerIfNeeded(chapters, existingMarkerTypes, MarkerType.CreditsStart,
                         document.CreditsStartSeconds.Value, options.OverwriteExistingMarkers);
 
