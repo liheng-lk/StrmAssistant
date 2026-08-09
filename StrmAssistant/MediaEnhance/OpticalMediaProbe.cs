@@ -468,8 +468,7 @@ namespace StrmAssistant.MediaEnhance
         private static string QuoteArgument(string value)
         {
             if (string.IsNullOrEmpty(value)) return "\"\"";
-            if (value.All(ch => !char.IsWhiteSpace(ch) && ch != '"')) return value;
-            return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
         }
 
         private static async Task<ProcessResult> RunProcessAsync(string executable, string arguments,
