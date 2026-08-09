@@ -222,7 +222,7 @@ namespace StrmAssistant.Api
                 .OrderBy(c => c.StartPositionTicks)
                 .ThenBy(c => (int)c.MarkerType)
                 .ToList();
-            _itemRepository.SaveChapters(episode.Id, chapters);
+            _itemRepository.SaveChapters(episode.InternalId, chapters);
 
             result.Applied = true;
             result.Success = true;
