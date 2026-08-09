@@ -12,6 +12,7 @@
     <PluginOutputPath>$(PluginOutputDir)\$(AssemblyName).dll</PluginOutputPath>
     <PluginInputPath>$(PluginBuildDir)\$(AssemblyName).dll</PluginInputPath>
     <ChineseConverterPath>$(PluginBuildDir)\ChineseConverter.dll</ChineseConverterPath>
+    <TinyPinyinPath>$(PluginBuildDir)\TinyPinyin.dll</TinyPinyinPath>
     <HarmonyPath>$(PkgLib_Harmony)\lib\net6.0\0Harmony.dll</HarmonyPath>
     <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' == 'Windows_NT'">$(UserProfile)\.dotnet\tools\ilrepack.exe</ILRepackExe>
     <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' != 'Windows_NT'">$(HOME)/.dotnet/tools/ilrepack</ILRepackExe>
@@ -38,6 +39,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Resource.Embedder" Version="2.2.0" />
+    <PackageReference Include="TinyPinyin" Version="1.1.0" />
   </ItemGroup>
   <ItemGroup>
     <Compile Update="Properties\Resources.Designer.cs">
@@ -63,8 +65,9 @@
     <Error Condition="!Exists('$(ILRepackExe)')" Text="ILRepack tool not found at $(ILRepackExe). Install it with: dotnet tool install -g dotnet-ilrepack" />
     <Error Condition="!Exists('$(PluginInputPath)')" Text="Plugin input not found at $(PluginInputPath)" />
     <Error Condition="!Exists('$(ChineseConverterPath)')" Text="ChineseConverter input not found at $(ChineseConverterPath)" />
+    <Error Condition="!Exists('$(TinyPinyinPath)')" Text="TinyPinyin input not found at $(TinyPinyinPath)" />
     <Error Condition="!Exists('$(HarmonyPath)')" Text="Harmony net6 runtime assembly was not found at $(HarmonyPath)." />
     <MakeDir Directories="$(PluginOutputDir)" />
-    <Exec Command="&quot;$(ILRepackExe)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(PluginInputPath)&quot; &quot;$(HarmonyPath)&quot; &quot;$(ChineseConverterPath)&quot; /lib:&quot;$(PluginBuildDir)&quot; /lib:&quot;$(PkgLib_Harmony)\lib\net6.0&quot;" />
+    <Exec Command="&quot;$(ILRepackExe)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(PluginInputPath)&quot; &quot;$(HarmonyPath)&quot; &quot;$(ChineseConverterPath)&quot; &quot;$(TinyPinyinPath)&quot; /lib:&quot;$(PluginBuildDir)&quot; /lib:&quot;$(PkgLib_Harmony)\lib\net6.0&quot;" />
   </Target>
 </Project>
