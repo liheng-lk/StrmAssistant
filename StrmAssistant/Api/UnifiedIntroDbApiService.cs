@@ -78,6 +78,8 @@ namespace StrmAssistant.Api
         public double MinimumConfidence { get; set; } = 0.75;
         public bool AllowCreditsMarker { get; set; } = true;
         public bool OverwriteExistingMarkers { get; set; }
+        public bool AutoApplyOnItemAdded { get; set; }
+        public int AutoApplyDelaySeconds { get; set; } = 30;
     }
 
     [Route("/StrmAssistant/IntroDb/{Id}/Preview", "GET", Summary = "Preview Unified IntroDb markers without modifying chapters")]
@@ -129,7 +131,9 @@ namespace StrmAssistant.Api
                 TimeoutSeconds = request?.TimeoutSeconds ?? 15,
                 MinimumConfidence = request?.MinimumConfidence ?? 0.75,
                 AllowCreditsMarker = request?.AllowCreditsMarker != false,
-                OverwriteExistingMarkers = request?.OverwriteExistingMarkers == true
+                OverwriteExistingMarkers = request?.OverwriteExistingMarkers == true,
+                AutoApplyOnItemAdded = request?.AutoApplyOnItemAdded == true,
+                AutoApplyDelaySeconds = request?.AutoApplyDelaySeconds ?? 30
             });
             return BuildStatus();
         }
@@ -215,7 +219,7 @@ namespace StrmAssistant.Api
             }
 
             chapters = chapters
-                .OrderBy(c => c.StartPositionTicks ?? 0)
+                .OrderBy(c => c.StartPositionTicks)
                 .ThenBy(c => (int)c.MarkerType)
                 .ToList();
             _itemRepository.SaveChapters(episode.Id, chapters);
@@ -296,11 +300,11 @@ namespace StrmAssistant.Api
             var markerTypes = new HashSet<MarkerType> { MarkerType.IntroStart, MarkerType.IntroEnd, MarkerType.CreditsStart };
             return (_itemRepository.GetChapters(episode) ?? new List<ChapterInfo>())
                 .Where(c => markerTypes.Contains(c.MarkerType))
-                .OrderBy(c => c.StartPositionTicks ?? 0)
+                .OrderBy(c => c.StartPositionTicks)
                 .Select(c => new UnifiedIntroDbMarkerView
                 {
                     MarkerType = c.MarkerType.ToString(),
-                    Seconds = TimeSpan.FromTicks(c.StartPositionTicks ?? 0).TotalSeconds,
+                    Seconds = TimeSpan.FromTicks(c.StartPositionTicks).TotalSeconds,
                     Name = c.Name
                 })
                 .ToList();
@@ -332,6 +336,8 @@ namespace StrmAssistant.Api
             };
             if (options.Enabled && string.IsNullOrWhiteSpace(options.EndpointTemplate))
                 result.Warnings.Add("Unified IntroDb is enabled but EndpointTemplate is empty.");
+            if (options.Enabled && options.AutoApplyOnItemAdded)
+                result.Warnings.Add("Automatic marker write-back is enabled for newly added episodes. Existing markers are preserved unless OverwriteExistingMarkers is enabled.");
             return result;
         }
 
