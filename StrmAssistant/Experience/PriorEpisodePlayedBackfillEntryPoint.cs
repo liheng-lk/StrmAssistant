@@ -40,7 +40,7 @@ namespace StrmAssistant.Experience
 
         private void OnUserDataSaved(object sender, UserDataSaveEventArgs e)
         {
-            if (_updatingPriorEpisodes || e?.Item is not Episode current || e.User == null || e.UserData == null)
+            if (_updatingPriorEpisodes || !(e?.Item is Episode current) || e.User == null || e.UserData == null)
                 return;
             if (Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions?.MarkPriorProgressEpisodesPlayed != true)
                 return;
