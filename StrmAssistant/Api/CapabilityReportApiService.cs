@@ -42,6 +42,8 @@ namespace StrmAssistant.Api
     {
         public string GeneratedUtc { get; set; }
         public string EmbyVersion { get; set; }
+        public string EmbyCompatibilityBand { get; set; }
+        public string EmbyVersionDetectionSource { get; set; }
         public string PluginAssemblyVersion { get; set; }
         public string PluginAssemblyName { get; set; }
         public bool ModSupported { get; set; }
@@ -90,10 +92,13 @@ namespace StrmAssistant.Api
 
             var optical = await opticalTask.ConfigureAwait(false);
             var assembly = typeof(Plugin).GetTypeInfo().Assembly.GetName();
+            var compatibility = EmbyRuntimeCompatibility.Detect(plugin?.ApplicationHost);
             var report = new CapabilityReport
             {
                 GeneratedUtc = DateTimeOffset.UtcNow.ToString("O"),
-                EmbyVersion = plugin?.ApplicationHost?.ApplicationVersion?.ToString(),
+                EmbyVersion = compatibility.ServerVersion?.ToString(),
+                EmbyCompatibilityBand = compatibility.Band.ToString(),
+                EmbyVersionDetectionSource = compatibility.DetectionSource,
                 PluginAssemblyName = assembly.Name,
                 PluginAssemblyVersion = assembly.Version?.ToString(),
                 ModSupported = plugin?.IsModSupported == true,
@@ -136,6 +141,8 @@ namespace StrmAssistant.Api
                 }
             };
 
+            if (!compatibility.IsKnown)
+                report.Warnings.Add("Emby runtime version could not be detected; version-sensitive features will rely on capability discovery only.");
             if (report.Options.DistributedFingerprint && report.DistributedTools?.Ffmpeg?.ChromaprintTestPassed == false)
                 report.Warnings.Add("Distributed fingerprint routing is enabled but the active Chromaprint test failed.");
             if (report.Options.OpticalProbe && report.OpticalProbe?.HasBlurayProtocol != true)
