@@ -20,17 +20,23 @@ namespace StrmAssistant.MediaEnhance
         public bool Attempted { get; set; }
         public bool Success { get; set; }
         public bool FellBackToNative { get; set; }
+        public bool OpticalMedia { get; set; }
+        public bool NativeFallbackAvailable { get; set; } = true;
         public int ExistingCount { get; set; }
         public int GeneratedCount { get; set; }
         public int FailedCount { get; set; }
         public string Executable { get; set; }
+        public string InputPath { get; set; }
+        public int? BluRayPlaylist { get; set; }
         public string Error { get; set; }
     }
 
     /// <summary>
     /// Pre-generates Emby chapter JPEGs with a custom/distributed ffmpeg executable.
     /// The caller still invokes Emby's native ThumbnailGenerator afterwards so Emby
-    /// remains responsible for chapter persistence, stale-image cleanup and BIF/thumbnail-set bookkeeping.
+    /// remains responsible for chapter persistence, stale-image cleanup and any supported
+    /// BIF/thumbnail-set bookkeeping. Blu-ray ISO/BDMV can use the same path when optical
+    /// probing is explicitly enabled; DVD ISO remains unsupported.
     /// </summary>
     public sealed class DistributedChapterImageGenerator
     {
@@ -73,9 +79,14 @@ namespace StrmAssistant.MediaEnhance
                 return result;
             }
 
-            if (OpticalMediaProbe.GetMediaKind(item) != OpticalMediaKind.Unsupported)
+            var inputPlan = BuildInputPlan(item, options);
+            result.OpticalMedia = inputPlan.OpticalMedia;
+            result.NativeFallbackAvailable = !inputPlan.OpticalMedia;
+            result.InputPath = inputPlan.InputPath;
+            result.BluRayPlaylist = inputPlan.BluRayPlaylist;
+            if (!inputPlan.Valid)
             {
-                result.Error = "ISO/BDMV chapter-image generation remains on the dedicated optical pipeline in this phase.";
+                result.Error = inputPlan.Error;
                 return result;
             }
 
@@ -114,7 +125,7 @@ namespace StrmAssistant.MediaEnhance
                 try
                 {
                     var processResult = await RunProcessAsync(result.Executable,
-                            BuildArguments(item.Path, seekSeconds, outputPath),
+                            BuildArguments(inputPlan, seekSeconds, outputPath),
                             Math.Max(10, Math.Min(options.DistributedChapterImageTimeoutSeconds, 600)),
                             cancellationToken)
                         .ConfigureAwait(false);
@@ -123,7 +134,7 @@ namespace StrmAssistant.MediaEnhance
                     {
                         result.FailedCount++;
                         failedMessages.Add(BuildProcessError(chapter.StartPositionTicks, processResult));
-                        if (!options.DistributedChapterImageFallbackToEmby) break;
+                        if (!options.DistributedChapterImageFallbackToEmby || inputPlan.OpticalMedia) break;
                         continue;
                     }
 
@@ -132,7 +143,7 @@ namespace StrmAssistant.MediaEnhance
                     {
                         result.FailedCount++;
                         failedMessages.Add("ffmpeg reported success but the chapter image is not visible on the Emby host: " + outputPath);
-                        if (!options.DistributedChapterImageFallbackToEmby) break;
+                        if (!options.DistributedChapterImageFallbackToEmby || inputPlan.OpticalMedia) break;
                         continue;
                     }
 
@@ -149,21 +160,101 @@ namespace StrmAssistant.MediaEnhance
                 {
                     result.FailedCount++;
                     failedMessages.Add("Chapter " + chapter.StartPositionTicks + " failed: " + ex.Message);
-                    if (!options.DistributedChapterImageFallbackToEmby) break;
+                    if (!options.DistributedChapterImageFallbackToEmby || inputPlan.OpticalMedia) break;
                 }
             }
 
-            // Persisting here makes the generated images immediately visible to Emby.
-            // Native ThumbnailGenerator still runs afterwards and remains the final authority.
+            // Persisting here makes generated images immediately visible to Emby even for
+            // optical media that native ThumbnailGenerator may consider ineligible for extraction.
             if (generatedAny)
             {
                 _itemRepository.SaveChapters(item.InternalId, chapters.ToList());
             }
 
-            result.FellBackToNative = result.FailedCount > 0 && options.DistributedChapterImageFallbackToEmby;
+            result.FellBackToNative = result.FailedCount > 0 &&
+                                      options.DistributedChapterImageFallbackToEmby &&
+                                      result.NativeFallbackAvailable;
             result.Success = result.FailedCount == 0 || result.FellBackToNative;
             result.Error = failedMessages.Count == 0 ? null : string.Join(" | ", failedMessages.Take(3));
             return result;
+        }
+
+        private static ChapterInputPlan BuildInputPlan(Video item, MediaInfoExtractOptions options)
+        {
+            var kind = OpticalMediaProbe.GetMediaKind(item);
+            var plan = new ChapterInputPlan
+            {
+                Valid = true,
+                InputPath = item.Path,
+                Kind = kind
+            };
+
+            if (kind == OpticalMediaKind.Unsupported) return plan;
+
+            plan.OpticalMedia = true;
+            if (options?.EnableOpticalMediaProbe != true)
+            {
+                plan.Valid = false;
+                plan.Error = "Optical chapter-image generation requires ISO / BDMV media probing to be enabled.";
+                return plan;
+            }
+
+            switch (kind)
+            {
+                case OpticalMediaKind.BluRayDirectory:
+                    plan.InputPath = "bluray:" + ResolveBluRayDiscRoot(item.Path);
+                    plan.BluRayPlaylist = TryResolveBluRayPlaylist(item);
+                    break;
+                case OpticalMediaKind.BluRayIso:
+                    plan.InputPath = "bluray:" + item.Path;
+                    break;
+                case OpticalMediaKind.GenericIso:
+                    // Generic ISO is passed directly to ffmpeg. Runtime support depends on
+                    // the ffmpeg build and the image's filesystem/container layout.
+                    plan.InputPath = item.Path;
+                    break;
+                case OpticalMediaKind.DvdIso:
+                    plan.Valid = false;
+                    plan.Error = "DVD ISO chapter-image generation is not implemented; no compatible DVD input contract has been verified.";
+                    break;
+            }
+
+            return plan;
+        }
+
+        private static int? TryResolveBluRayPlaylist(Video item)
+        {
+            try
+            {
+                if (Plugin.Instance?.ApplicationHost == null) return null;
+                var enricher = new BluRayDiscInfoEnricher(Plugin.Instance.ApplicationHost);
+                var probe = new OpticalProbeResult { Success = true };
+                var summary = enricher.Enrich(item, probe);
+                return ParsePlaylistNumber(summary?.PlaylistName);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance?.Logger?.Debug("DistributedChapterImage - Blu-ray playlist detection failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        private static string ResolveBluRayDiscRoot(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return path;
+            var trimmed = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(Path.GetFileName(trimmed), "BDMV", StringComparison.OrdinalIgnoreCase)
+                ? Path.GetDirectoryName(trimmed)
+                : trimmed;
+        }
+
+        private static int? ParsePlaylistNumber(string playlistName)
+        {
+            if (string.IsNullOrWhiteSpace(playlistName)) return null;
+            var fileName = Path.GetFileNameWithoutExtension(playlistName.Trim());
+            return int.TryParse(fileName, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+                ? value
+                : (int?)null;
         }
 
         private static string ResolveExecutable(MediaInfoExtractOptions options)
@@ -184,12 +275,25 @@ namespace StrmAssistant.MediaEnhance
             return Path.Combine(chapterDirectory, filename);
         }
 
-        private static string BuildArguments(string inputPath, double seekSeconds, string outputPath)
+        private static string BuildArguments(ChapterInputPlan inputPlan, double seekSeconds, string outputPath)
         {
             var builder = new StringBuilder();
             builder.Append("-hide_banner -loglevel error ");
-            builder.Append("-ss ").Append(seekSeconds.ToString("0.###", CultureInfo.InvariantCulture)).Append(' ');
-            builder.Append("-i ").Append(QuoteArgument(inputPath)).Append(' ');
+
+            if (inputPlan.BluRayPlaylist.HasValue)
+                builder.Append("-playlist ").Append(inputPlan.BluRayPlaylist.Value).Append(' ');
+
+            if (inputPlan.OpticalMedia)
+            {
+                builder.Append("-i ").Append(QuoteArgument(inputPlan.InputPath)).Append(' ');
+                builder.Append("-ss ").Append(seekSeconds.ToString("0.###", CultureInfo.InvariantCulture)).Append(' ');
+            }
+            else
+            {
+                builder.Append("-ss ").Append(seekSeconds.ToString("0.###", CultureInfo.InvariantCulture)).Append(' ');
+                builder.Append("-i ").Append(QuoteArgument(inputPlan.InputPath)).Append(' ');
+            }
+
             builder.Append("-map 0:v:0 -an -sn -dn -frames:v 1 -q:v 2 -y ");
             builder.Append(QuoteArgument(outputPath));
             return builder.ToString();
@@ -263,6 +367,16 @@ namespace StrmAssistant.MediaEnhance
                 StandardOutput = await stdoutTask.ConfigureAwait(false),
                 StandardError = await stderrTask.ConfigureAwait(false)
             };
+        }
+
+        private sealed class ChapterInputPlan
+        {
+            public bool Valid { get; set; }
+            public bool OpticalMedia { get; set; }
+            public OpticalMediaKind Kind { get; set; }
+            public string InputPath { get; set; }
+            public int? BluRayPlaylist { get; set; }
+            public string Error { get; set; }
         }
 
         private sealed class ProcessResult
