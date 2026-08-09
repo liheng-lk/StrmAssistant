@@ -281,26 +281,33 @@ namespace StrmAssistant.IntroSkip
             if (identity == null || !identity.SeasonNumber.HasValue || !identity.EpisodeNumber.HasValue)
                 return null;
 
-            var hasTmdb = long.TryParse(identity.SeriesTmdbId, out var tmdbId) && tmdbId > 0;
-            var hasImdb = !string.IsNullOrWhiteSpace(identity.SeriesImdbId);
+            var tmdbText = !string.IsNullOrWhiteSpace(identity.EpisodeTmdbId)
+                ? identity.EpisodeTmdbId
+                : identity.SeriesTmdbId;
+            var imdbText = !string.IsNullOrWhiteSpace(identity.EpisodeImdbId)
+                ? identity.EpisodeImdbId
+                : identity.SeriesImdbId;
+            var hasTmdb = long.TryParse(tmdbText, out var tmdbId) && tmdbId > 0;
+            var hasImdb = !string.IsNullOrWhiteSpace(imdbText);
             if (!hasTmdb && !hasImdb) return null;
 
-            var query = hasTmdb
+            var baseQuery = hasTmdb
                 ? "?tmdb_id=" + tmdbId.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                : "?imdb_id=" + Uri.EscapeDataString(identity.SeriesImdbId);
-            query += "&season=" + identity.SeasonNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) +
-                     "&episode=" + identity.EpisodeNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                : "?imdb_id=" + Uri.EscapeDataString(imdbText);
+            baseQuery += "&season=" + identity.SeasonNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                         "&episode=" + identity.EpisodeNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var v3Query = baseQuery;
             if (identity.DurationMs.HasValue && identity.DurationMs.Value > 0)
-                query += "&duration_ms=" + identity.DurationMs.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                v3Query += "&duration_ms=" + identity.DurationMs.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
             await WaitForRateGateAsync(cancellationToken).ConfigureAwait(false);
-            var json = await GetJsonAsync(V3Endpoint + query, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var json = await GetJsonAsync(V3Endpoint + v3Query, timeoutSeconds, cancellationToken).ConfigureAwait(false);
             var result = Parse(json, identity, "v3");
             if (result != null) return result;
 
             if (!hasTmdb) return null;
             await WaitForRateGateAsync(cancellationToken).ConfigureAwait(false);
-            json = await GetJsonAsync(V2Endpoint + query, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            json = await GetJsonAsync(V2Endpoint + baseQuery, timeoutSeconds, cancellationToken).ConfigureAwait(false);
             return Parse(json, identity, "v2");
         }
 
@@ -322,7 +329,7 @@ namespace StrmAssistant.IntroSkip
                     Source = Name + " " + apiVersion,
                     ExternalId = response.tmdb_id > 0 ? response.tmdb_id.ToString() :
                         (!string.IsNullOrWhiteSpace(response.imdb_id) ? response.imdb_id :
-                            (identity.SeriesTmdbId ?? identity.SeriesImdbId))
+                            (identity.EpisodeTmdbId ?? identity.SeriesTmdbId ?? identity.EpisodeImdbId ?? identity.SeriesImdbId))
                 };
                 Apply(result, intro, "intro");
                 Apply(result, recap, "recap");
