@@ -13,8 +13,8 @@ namespace StrmAssistant.Options
         [DisplayNameL("PluginOptions_IntroSkipOptions_Intro_Credits_Detection", typeof(Resources))]
         public override string EditorTitle => Resources.PluginOptions_IntroSkipOptions_Intro_Credits_Detection;
         
-        [DisplayNameL("IntroSkipOptions_UnlockIntroSkip_Built_in_Intro_Skip_Enhanced", typeof(Resources))]
-        [DescriptionL("IntroSkipOptions_UnlockIntroSkip_Unlock_Strm_support_for_built_in_intro_skip_detection", typeof(Resources))]
+        [DisplayName("原生片头探测增强（可选）")]
+        [Description("可选增强项，用于扩展 Emby 原生片头探测能力；它不是片头片尾检测的总开关。默认关闭。")]
         [Required]
         public bool UnlockIntroSkip { get; set; } = false;
 
@@ -63,14 +63,14 @@ namespace StrmAssistant.Options
             set { }
         }
 
-        [DisplayNameL("PluginOptions_EnableIntroSkip_Enable_Intro_Skip__Experimental_", typeof(Resources))]
-        [DescriptionL("PluginOptions_EnableIntroSkip_Enable_intro_skip_and_credits_skip_for_episodes__Default_is_False_", typeof(Resources))]
+        [DisplayName("启用片头片尾检测（总开关）")]
+        [Description("片头片尾功能总开关。关闭时播放行为探测和在线数据库匹配都不会执行；要使用 IntroDB.app 或 TheIntroDB.org，必须开启此项。")]
+        [Required]
         public bool EnableIntroSkip { get; set; } = false;
 
         [DisplayName("启用在线片头/片尾数据库匹配")]
-        [Description("开启后将在线数据库匹配并入片头片尾流程。优先使用 IntroDB.app 与 TheIntroDB.org；匹配不到时仍可继续使用 Emby 原生声纹。")]
+        [Description("在线匹配总开关。只有本项和上面的“启用片头片尾检测（总开关）”都开启时才会实际查询 IntroDB.app / TheIntroDB.org。此开关始终显示，避免子选项可见但在线功能实际未启用。")]
         [Required]
-        [VisibleCondition(nameof(EnableIntroSkip), SimpleCondition.IsTrue)]
         public bool EnableOnlineIntroDb { get; set; } = true;
 
         [DisplayName("使用 IntroDB.app")]
