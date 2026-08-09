@@ -129,6 +129,7 @@ namespace StrmAssistant.Common
             }
 
             var libraryOptions = _libraryManager.GetLibraryOptions(item);
+            libraryOptions.IntroDetectionFingerprintLength = GetFingerprintMinutes(item);
             var manager = SelectFingerprintManager(item, out var distributed);
             if (manager == null)
             {
@@ -354,6 +355,85 @@ namespace StrmAssistant.Common
             return Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions?.DistributedFingerprintFallbackToEmby != false;
         }
 
+        public int GetFingerprintMinutes(BaseItem item)
+        {
+            var options = Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions;
+            var fallback = ClampFingerprintMinutes(options?.IntroDetectionFingerprintMinutes ?? 10);
+            var overrides = ParseFingerprintDurationOverrides(options?.FingerprintDurationOverrides);
+            if (overrides.Count == 0 || item == null) return fallback;
+
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (item is CollectionFolder folder)
+            {
+                keys.Add(folder.Name ?? string.Empty);
+                keys.Add(folder.InternalId.ToString());
+            }
+            else
+            {
+                try
+                {
+                    foreach (var collectionFolder in _libraryManager.GetCollectionFolders(item))
+                    {
+                        if (collectionFolder == null) continue;
+                        keys.Add(collectionFolder.Name ?? string.Empty);
+                        keys.Add(collectionFolder.InternalId.ToString());
+                    }
+                }
+                catch
+                {
+                    // The global fallback remains authoritative when a collection folder cannot be resolved.
+                }
+            }
+
+            foreach (var key in keys.Where(k => !string.IsNullOrWhiteSpace(k)))
+            {
+                if (overrides.TryGetValue(key.Trim(), out var minutes)) return minutes;
+            }
+
+            return fallback;
+        }
+
+        private int GetMinimumConfiguredFingerprintMinutes()
+        {
+            var options = Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions;
+            var values = ParseFingerprintDurationOverrides(options?.FingerprintDurationOverrides).Values.ToList();
+            values.Add(ClampFingerprintMinutes(options?.IntroDetectionFingerprintMinutes ?? 10));
+            return values.Min();
+        }
+
+        private static Dictionary<string, int> ParseFingerprintDurationOverrides(string value)
+        {
+            var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(value)) return result;
+
+            foreach (var rawLine in value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var line = rawLine.Trim();
+                if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal)) continue;
+
+                var separator = line.IndexOf("=>", StringComparison.Ordinal);
+                var separatorLength = 2;
+                if (separator < 0)
+                {
+                    separator = line.IndexOf('=');
+                    separatorLength = 1;
+                }
+
+                if (separator <= 0) continue;
+                var key = line.Substring(0, separator).Trim().Trim('"');
+                var minutesText = line.Substring(separator + separatorLength).Trim();
+                if (string.IsNullOrWhiteSpace(key) || !int.TryParse(minutesText, out var minutes)) continue;
+                result[key] = ClampFingerprintMinutes(minutes);
+            }
+
+            return result;
+        }
+
+        private static int ClampFingerprintMinutes(int value)
+        {
+            return Math.Max(2, Math.Min(value, 20));
+        }
+
         public bool IsLibraryInScope(BaseItem item)
         {
             return !string.IsNullOrEmpty(item.Path) && LibraryPathsInScope.Any(l => item.Path.StartsWith(l));
@@ -526,9 +606,8 @@ namespace StrmAssistant.Common
                         ? new[] { Resources.Favorites }.Concat(librariesSelected.Select(l => l.Name))
                         : librariesSelected.Select(l => l.Name)).DefaultIfEmpty("ALL"))));
 
-            var introDetectionFingerprintMinutes =
-                Plugin.Instance.GetPluginOptions().IntroSkipOptions.IntroDetectionFingerprintMinutes;
-            _logger.Info("Intro Detection Fingerprint Length (Minutes): " + introDetectionFingerprintMinutes);
+            var minimumFingerprintMinutes = GetMinimumConfiguredFingerprintMinutes();
+            _logger.Info("Intro Detection Minimum Fingerprint Length (Minutes): " + minimumFingerprintMinutes);
 
             var itemsFingerprintQuery = new InternalItemsQuery
             {
@@ -536,7 +615,7 @@ namespace StrmAssistant.Common
                 Recursive = true,
                 GroupByPresentationUniqueKey = false,
                 WithoutChapterMarkers = new[] { MarkerType.IntroStart },
-                MinRunTimeTicks = TimeSpan.FromMinutes(introDetectionFingerprintMinutes).Ticks,
+                MinRunTimeTicks = TimeSpan.FromMinutes(minimumFingerprintMinutes).Ticks,
                 HasIntroDetectionFailure = false,
                 HasAudioStream = true
             };
@@ -554,8 +633,11 @@ namespace StrmAssistant.Common
             }
 
             var isModSupported = Plugin.Instance.IsModSupported;
-            var items = _libraryManager.GetItemList(itemsFingerprintQuery).Where(i => isModSupported || !i.IsShortcut)
-                .OfType<Episode>().ToList();
+            var items = _libraryManager.GetItemList(itemsFingerprintQuery)
+                .Where(i => isModSupported || !i.IsShortcut)
+                .OfType<Episode>()
+                .Where(e => e.RunTimeTicks.GetValueOrDefault() >= TimeSpan.FromMinutes(GetFingerprintMinutes(e)).Ticks)
+                .ToList();
 
             return MediaExtractionFilter.Apply(items).ToList();
         }
@@ -566,29 +648,42 @@ namespace StrmAssistant.Common
                 .Where(f => f.CollectionType == CollectionType.TvShows.ToString() || f.CollectionType is null)
                 .ToList();
 
-            var currentLength = Plugin.Instance.GetPluginOptions().IntroSkipOptions.IntroDetectionFingerprintMinutes;
-
             foreach (var library in libraries)
             {
                 var options = library.LibraryOptions;
+                if (!long.TryParse(library.ItemId, out var itemId)) continue;
 
-                if (options.IntroDetectionFingerprintLength != currentLength &&
-                    long.TryParse(library.ItemId, out var itemId))
-                {
-                    options.IntroDetectionFingerprintLength = currentLength;
-                    CollectionFolder.SaveLibraryOptions(itemId, options);
-                }
+                var collectionFolder = _libraryManager.GetItemById(itemId) as CollectionFolder;
+                var desiredLength = collectionFolder != null
+                    ? GetFingerprintMinutes(collectionFolder)
+                    : ResolveVirtualFolderFingerprintMinutes(library.Name, library.ItemId);
+
+                if (options.IntroDetectionFingerprintLength == desiredLength) continue;
+                options.IntroDetectionFingerprintLength = desiredLength;
+                CollectionFolder.SaveLibraryOptions(itemId, options);
+                _logger.Info("IntroFingerprintExtract - Library fingerprint length updated: {0} = {1} minutes",
+                    library.Name, desiredLength);
             }
+        }
+
+        private int ResolveVirtualFolderFingerprintMinutes(string name, string id)
+        {
+            var options = Plugin.Instance?.GetPluginOptions()?.IntroSkipOptions;
+            var fallback = ClampFingerprintMinutes(options?.IntroDetectionFingerprintMinutes ?? 10);
+            var overrides = ParseFingerprintDurationOverrides(options?.FingerprintDurationOverrides);
+            if (!string.IsNullOrWhiteSpace(name) && overrides.TryGetValue(name.Trim(), out var byName)) return byName;
+            if (!string.IsNullOrWhiteSpace(id) && overrides.TryGetValue(id.Trim(), out var byId)) return byId;
+            return fallback;
         }
 
 #nullable enable
         public async Task UpdateIntroMarkerForSeason(Season season, CancellationToken cancellationToken,
             IProgress<double>? progress = null)
         {
-            var introDetectionFingerprintMinutes =
-                Plugin.Instance.GetPluginOptions().IntroSkipOptions.IntroDetectionFingerprintMinutes;
+            var introDetectionFingerprintMinutes = GetFingerprintMinutes(season);
 
             var libraryOptions = _libraryManager.GetLibraryOptions(season);
+            libraryOptions.IntroDetectionFingerprintLength = introDetectionFingerprintMinutes;
             var directoryService = new DirectoryService(_logger, _fileSystem);
 
             var episodeQuery = new InternalItemsQuery
