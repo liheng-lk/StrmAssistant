@@ -66,6 +66,16 @@ const strmAssistantCommandSource = {
             'zh-hk': '\u6DF1\u5EA6\u522A\u9664',
             'zh-tw': '\u6DF1\u5EA6\u522A\u9664'
         }[locale] || 'Deep Delete');
+        const clearThumbnailCommandName = ({
+            'zh-cn': '\u6E05\u9664\u7AE0\u8282\u56FE/BIF\u7F13\u5B58',
+            'zh-hk': '\u6E05\u9664\u7AE0\u7BC0\u5716/BIF\u5FEB\u53D6',
+            'zh-tw': '\u6E05\u9664\u7AE0\u7BC0\u5716/BIF\u5FEB\u53D6'
+        }[locale] || 'Clear Chapter/BIF Cache');
+        const clearMediaInfoCommandName = ({
+            'zh-cn': '\u6E05\u9664\u5A92\u4F53\u4FE1\u606F',
+            'zh-hk': '\u6E05\u9664\u5A92\u9AD4\u8CC7\u8A0A',
+            'zh-tw': '\u6E05\u9664\u5A92\u9AD4\u8CC7\u8A0A'
+        }[locale] || 'Clear MediaInfo');
 
         if (options.items?.length === 1 && options.items[0].LibraryOptions && options.items[0].Type === 'VirtualFolder' &&
             options.items[0].CollectionType !== 'boxsets' && options.items[0].CollectionType !== 'playlists') {
@@ -98,6 +108,12 @@ const strmAssistantCommandSource = {
                 ['Movie', 'Episode', 'Video', 'MusicVideo', 'Audio'].includes(item.Type)) {
                 result.push({ name: deepDeleteCommandName, id: 'deep_delete', icon: 'delete_forever' });
             }
+            if (isAdmin && ['Movie', 'Episode', 'Video', 'MusicVideo'].includes(item.Type)) {
+                result.push({ name: clearThumbnailCommandName, id: 'clear_thumbnails', icon: 'image_not_supported' });
+            }
+            if (isAdmin && ['Movie', 'Episode', 'Video', 'MusicVideo', 'Audio'].includes(item.Type)) {
+                result.push({ name: clearMediaInfoCommandName, id: 'clear_mediainfo', icon: 'restart_alt' });
+            }
             if (item.hasOwnProperty('LockData') && item.Type !== 'CollectionFolder' && isAdmin) {
                 if (item.LockData) {
                     result.push({ name: unlockCommandName, id: 'unlock', icon: 'lock_open' });
@@ -128,6 +144,8 @@ const strmAssistantCommandSource = {
             remove: 'remove',
             traverse: 'traverse',
             deep_delete: 'deepdelete',
+            clear_thumbnails: 'clear_thumbnails',
+            clear_mediainfo: 'clear_mediainfo',
             lock: 'lock',
             unlock: 'unlock',
             clear_intro: 'clear_intro'
