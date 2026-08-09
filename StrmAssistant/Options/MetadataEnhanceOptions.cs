@@ -73,6 +73,16 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(PreferOriginalPoster), SimpleCondition.IsTrue)]
         public bool PreferOriginalBackdrop { get; set; } = false;
 
+        [DisplayName("TMDB Episode Group（实验）")]
+        [Description("对带有 TmdbEg 外部 ID 的剧集启用 TMDB Episode Group。Episode metadata/图片请求会临时映射到 TMDB 原始季集号，返回后恢复组内季集号。")]
+        [Required]
+        public bool MovieDbEpisodeGroup { get; set; } = false;
+
+        [DisplayName("Local Episode Group（实验）")]
+        [Description("优先读取剧集目录中的 episodegroup.json。该文件可由在线 Episode Group 自动生成，也可手工维护；不存在时不会改变原生季集编号。")]
+        [Required]
+        public bool LocalEpisodeGroup { get; set; } = false;
+
         [DisplayName("拼音首字母排序")]
         [Description("中文标题按拼音首字母参与字母索引排序；只改变运行时 SortName 计算，不批量写数据库，也不会覆盖已锁定的 SortName。")]
         [Required]
