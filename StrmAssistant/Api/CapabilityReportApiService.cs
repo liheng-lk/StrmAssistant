@@ -2,6 +2,7 @@ using MediaBrowser.Controller.Api;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Serialization;
 using MediaBrowser.Model.Services;
+using StrmAssistant.Compatibility;
 using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
@@ -32,6 +33,9 @@ namespace StrmAssistant.Api
         public bool DeepDelete { get; set; }
         public bool DeepDeleteDryRun { get; set; }
         public bool NotificationEnhance { get; set; }
+        public bool ProxyEnhance { get; set; }
+        public string ProxyMode { get; set; }
+        public bool PeopleDisplayFilter { get; set; }
     }
 
     public sealed class CapabilityReport
@@ -42,6 +46,7 @@ namespace StrmAssistant.Api
         public string PluginAssemblyName { get; set; }
         public bool ModSupported { get; set; }
         public CapabilityOptionSummary Options { get; set; }
+        public RuntimeModCapabilityStatus RuntimeMods { get; set; }
         public DistributedExtractHealthResult DistributedTools { get; set; }
         public FingerprintRuntimeCapabilityResult Fingerprint { get; set; }
         public OpticalProbeHealthResponse OpticalProbe { get; set; }
@@ -57,10 +62,6 @@ namespace StrmAssistant.Api
         public bool RunVulkanTest { get; set; }
     }
 
-    /// <summary>
-    /// Aggregates existing read-only diagnostics into one report intended for full-feature testing.
-    /// The optional active tests use synthetic media only and never mutate library items.
-    /// </summary>
     public sealed class CapabilityReportApiService : BaseApiService
     {
         private readonly DistributedExtractDiagnostics _distributedDiagnostics = new DistributedExtractDiagnostics();
@@ -116,8 +117,12 @@ namespace StrmAssistant.Api
                     MediaInfoSyncPathMappings = mediaOptions?.MediaInfoSyncPathMappings,
                     DeepDelete = experienceOptions?.EnableDeepDelete == true,
                     DeepDeleteDryRun = experienceOptions?.DeepDeleteDryRun != false,
-                    NotificationEnhance = experienceOptions?.EnableNotificationEnhance == true
+                    NotificationEnhance = experienceOptions?.EnableNotificationEnhance == true,
+                    ProxyEnhance = generalOptions?.EnableProxyServerEnhance == true,
+                    ProxyMode = generalOptions?.ProxyMode.ToString(),
+                    PeopleDisplayFilter = experienceOptions?.EnablePeopleDisplayFilter == true
                 },
+                RuntimeMods = RuntimeModState.Status,
                 DistributedTools = await distributedTask.ConfigureAwait(false),
                 Fingerprint = _fingerprintDiagnostics.Inspect(Plugin.FingerprintApi),
                 OpticalProbe = new OpticalProbeHealthResponse
@@ -131,23 +136,20 @@ namespace StrmAssistant.Api
                 }
             };
 
-            if (report.Options.DistributedFingerprint &&
-                report.DistributedTools?.Ffmpeg?.ChromaprintTestPassed == false)
+            if (report.Options.DistributedFingerprint && report.DistributedTools?.Ffmpeg?.ChromaprintTestPassed == false)
                 report.Warnings.Add("Distributed fingerprint routing is enabled but the active Chromaprint test failed.");
-
             if (report.Options.OpticalProbe && report.OpticalProbe?.HasBlurayProtocol != true)
                 report.Warnings.Add("Optical probing is enabled but the configured ffprobe did not report the bluray protocol.");
-
-            if (report.Options.SharedMediaInfoSync &&
-                string.IsNullOrWhiteSpace(report.Options.MediaInfoSharedRoot))
+            if (report.Options.SharedMediaInfoSync && string.IsNullOrWhiteSpace(report.Options.MediaInfoSharedRoot))
                 report.Warnings.Add("Shared MediaInfo sync is enabled but MediaInfoJsonRootFolder is empty.");
-
-            if (report.Options.SharedMediaInfoSync && report.Options.SharedMediaInfoSyncRequiresMapping &&
-                string.IsNullOrWhiteSpace(report.Options.MediaInfoSyncPathMappings))
+            if (report.Options.SharedMediaInfoSync && report.Options.SharedMediaInfoSyncRequiresMapping && string.IsNullOrWhiteSpace(report.Options.MediaInfoSyncPathMappings))
                 report.Warnings.Add("Shared MediaInfo sync requires portable path mappings, but no mapping rules are configured.");
-
             if (report.Options.DeepDelete && !report.Options.DeepDeleteDryRun)
                 report.Warnings.Add("Deep Delete is enabled with Dry Run disabled. Keep real file-deletion tests on disposable media first.");
+            if (report.Options.ProxyEnhance && report.RuntimeMods?.HttpHandlerPatched != true)
+                report.Warnings.Add("Proxy enhancement is enabled but the runtime HTTP handler patch is not active.");
+            if (report.Options.PeopleDisplayFilter && report.RuntimeMods?.AttachPeoplePatched != true)
+                report.Warnings.Add("People display filtering is enabled but DtoService.AttachPeople was not patched.");
 
             return report;
         }
