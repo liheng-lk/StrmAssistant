@@ -3,6 +3,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Plugins;
 using StrmAssistant.Experience;
 using System;
+using System.Collections;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
@@ -94,16 +95,31 @@ namespace StrmAssistant.Compatibility
         {
             if (video == null) return false;
 
+            // Use reflection for alternate-version signals so older/newer Emby builds can compile
+            // even when one of these convenience members is renamed or removed.
             try
             {
-                var alternateIds = video.GetAlternateVersionIds();
-                if (alternateIds != null && alternateIds.Count > 0) return true;
+                var method = video.GetType().GetMethod("GetAlternateVersionIds",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, Type.EmptyTypes, null);
+                var value = method?.Invoke(video, Array.Empty<object>());
+                if (value is ICollection collection && collection.Count > 0) return true;
+                if (value is IEnumerable enumerable)
+                {
+                    var enumerator = enumerable.GetEnumerator();
+                    try { if (enumerator.MoveNext()) return true; }
+                    finally { (enumerator as IDisposable)?.Dispose(); }
+                }
             }
             catch { }
 
             try
             {
-                if (video.IsSecondaryMergedItemInSameFolder) return true;
+                var secondaryProperty = video.GetType().GetProperty("IsSecondaryMergedItemInSameFolder",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (secondaryProperty?.CanRead == true &&
+                    secondaryProperty.GetValue(video) is bool secondary && secondary)
+                    return true;
             }
             catch { }
 
