@@ -7,6 +7,11 @@ namespace StrmAssistant.IntroSkip
     public sealed class UnifiedIntroDbOptions
     {
         public bool Enabled { get; set; }
+        public bool IntroDbAppEnabled { get; set; } = true;
+        public bool TheIntroDbEnabled { get; set; } = true;
+        public bool CustomProviderEnabled { get; set; } = true;
+        public string ProviderOrder { get; set; } = "IntroDbApp,TheIntroDb,Custom";
+        public int CacheMinutes { get; set; } = 60;
         public string EndpointTemplate { get; set; } = string.Empty;
         public int TimeoutSeconds { get; set; } = 15;
         public double MinimumConfidence { get; set; } = 0.75;
@@ -45,6 +50,11 @@ namespace StrmAssistant.IntroSkip
                 File.WriteAllLines(_path, new[]
                 {
                     "Enabled=" + _options.Enabled,
+                    "IntroDbAppEnabled=" + _options.IntroDbAppEnabled,
+                    "TheIntroDbEnabled=" + _options.TheIntroDbEnabled,
+                    "CustomProviderEnabled=" + _options.CustomProviderEnabled,
+                    "ProviderOrder=" + _options.ProviderOrder,
+                    "CacheMinutes=" + _options.CacheMinutes,
                     "EndpointTemplate=" + _options.EndpointTemplate,
                     "TimeoutSeconds=" + _options.TimeoutSeconds,
                     "MinimumConfidence=" + _options.MinimumConfidence.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -53,6 +63,7 @@ namespace StrmAssistant.IntroSkip
                     "AutoApplyOnItemAdded=" + _options.AutoApplyOnItemAdded,
                     "AutoApplyDelaySeconds=" + _options.AutoApplyDelaySeconds
                 });
+                UnifiedIntroDbBridge.ClearCache();
                 return Clone(_options);
             }
         }
@@ -85,6 +96,11 @@ namespace StrmAssistant.IntroSkip
                     switch (key)
                     {
                         case "Enabled": result.Enabled = ParseBool(value, false); break;
+                        case "IntroDbAppEnabled": result.IntroDbAppEnabled = ParseBool(value, true); break;
+                        case "TheIntroDbEnabled": result.TheIntroDbEnabled = ParseBool(value, true); break;
+                        case "CustomProviderEnabled": result.CustomProviderEnabled = ParseBool(value, true); break;
+                        case "ProviderOrder": result.ProviderOrder = value; break;
+                        case "CacheMinutes": if (int.TryParse(value, out var cache)) result.CacheMinutes = cache; break;
                         case "EndpointTemplate": result.EndpointTemplate = value; break;
                         case "TimeoutSeconds": if (int.TryParse(value, out var timeout)) result.TimeoutSeconds = timeout; break;
                         case "MinimumConfidence": if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var confidence)) result.MinimumConfidence = confidence; break;
@@ -108,6 +124,13 @@ namespace StrmAssistant.IntroSkip
             return new UnifiedIntroDbOptions
             {
                 Enabled = value.Enabled,
+                IntroDbAppEnabled = value.IntroDbAppEnabled,
+                TheIntroDbEnabled = value.TheIntroDbEnabled,
+                CustomProviderEnabled = value.CustomProviderEnabled,
+                ProviderOrder = string.IsNullOrWhiteSpace(value.ProviderOrder)
+                    ? "IntroDbApp,TheIntroDb,Custom"
+                    : value.ProviderOrder.Trim(),
+                CacheMinutes = Math.Max(0, Math.Min(value.CacheMinutes, 1440)),
                 EndpointTemplate = value.EndpointTemplate?.Trim() ?? string.Empty,
                 TimeoutSeconds = Math.Max(3, Math.Min(value.TimeoutSeconds, 120)),
                 MinimumConfidence = Math.Max(0, Math.Min(value.MinimumConfidence, 1)),
