@@ -29,9 +29,6 @@ namespace StrmAssistant.Common
         private readonly object _thumbnailGenerator;
         private readonly MethodInfo _refreshThumbnailImages;
 
-        private static readonly Version AppVer = Plugin.Instance.ApplicationHost.ApplicationVersion;
-        private static readonly Version Ver4936 = new Version("4.9.0.36");
-
         public VideoThumbnailApi(ILibraryManager libraryManager, IFileSystem fileSystem,
             IImageExtractionManager imageExtractionManager, IItemRepository itemRepository,
             IMediaMountManager mediaMountManager, IServerApplicationPaths applicationPaths,
@@ -123,21 +120,36 @@ namespace StrmAssistant.Common
                 }
             }
 
-            var mediaSource = AppVer >= Ver4936
+            var methodParameters = _refreshThumbnailImages.GetParameters();
+            var mediaSource = methodParameters.Length >= 9
                 ? item.GetMediaSources(false, false, libraryOptions).FirstOrDefault()
                 : null;
 
-            var parameters = AppVer >= Ver4936
-                ? new object[]
-                {
-                    item, mediaSource, null, libraryOptions, directoryService, chapters, extractImages,
-                    saveChapters, cancellationToken
-                }
-                : new object[]
-                {
-                    item, null, libraryOptions, directoryService, chapters, extractImages, saveChapters,
-                    cancellationToken
-                };
+            object[] parameters;
+            switch (methodParameters.Length)
+            {
+                case 10:
+                    parameters = new object[]
+                    {
+                        item, mediaSource, null, libraryOptions, directoryService, chapters, extractImages,
+                        extractImages, saveChapters, cancellationToken
+                    };
+                    break;
+                case 9:
+                    parameters = new object[]
+                    {
+                        item, mediaSource, null, libraryOptions, directoryService, chapters, extractImages,
+                        saveChapters, cancellationToken
+                    };
+                    break;
+                default:
+                    parameters = new object[]
+                    {
+                        item, null, libraryOptions, directoryService, chapters, extractImages, saveChapters,
+                        cancellationToken
+                    };
+                    break;
+            }
 
             return await ((Task<bool>)_refreshThumbnailImages.Invoke(_thumbnailGenerator, parameters))
                 .ConfigureAwait(false);
