@@ -12,6 +12,7 @@
     <PluginOutputPath>$(PluginOutputDir)\$(AssemblyName).dll</PluginOutputPath>
     <PluginInputPath>$(PluginBuildDir)\$(AssemblyName).dll</PluginInputPath>
     <ChineseConverterPath>$(PluginBuildDir)\ChineseConverter.dll</ChineseConverterPath>
+    <HarmonyPath>$(PkgLib_Harmony)\lib\net6.0\0Harmony.dll</HarmonyPath>
     <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' == 'Windows_NT'">$(UserProfile)\.dotnet\tools\ilrepack.exe</ILRepackExe>
     <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' != 'Windows_NT'">$(HOME)/.dotnet/tools/ilrepack</ILRepackExe>
   </PropertyGroup>
@@ -58,21 +59,12 @@
     </EmbeddedResource>
   </ItemGroup>
   <Target Name="PackagePlugin" DependsOnTargets="Build">
-    <ItemGroup>
-      <HarmonyDllFiles Include="$(PkgLib_Harmony)\**\*.dll" />
-      <HarmonyZeroCandidate Include="$(PkgLib_Harmony)\**\0Harmony.dll" />
-    </ItemGroup>
-    <PropertyGroup>
-      <HarmonyPath>@(HarmonyZeroCandidate)</HarmonyPath>
-    </PropertyGroup>
-    <Message Importance="High" Text="Harmony package root: $(PkgLib_Harmony)" />
-    <Message Importance="High" Text="Harmony DLL: %(HarmonyDllFiles.Identity)" />
-    <Message Importance="High" Text="Harmony 0Harmony candidate: $(HarmonyPath)" />
+    <Message Importance="High" Text="Harmony runtime asset: $(HarmonyPath)" />
     <Error Condition="!Exists('$(ILRepackExe)')" Text="ILRepack tool not found at $(ILRepackExe). Install it with: dotnet tool install -g dotnet-ilrepack" />
     <Error Condition="!Exists('$(PluginInputPath)')" Text="Plugin input not found at $(PluginInputPath)" />
     <Error Condition="!Exists('$(ChineseConverterPath)')" Text="ChineseConverter input not found at $(ChineseConverterPath)" />
-    <Error Condition="'$(HarmonyPath)' == '' or !Exists('$(HarmonyPath)')" Text="Harmony runtime assembly was not found under $(PkgLib_Harmony)." />
+    <Error Condition="!Exists('$(HarmonyPath)')" Text="Harmony net6 runtime assembly was not found at $(HarmonyPath)." />
     <MakeDir Directories="$(PluginOutputDir)" />
-    <Exec Command="&quot;$(ILRepackExe)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(PluginInputPath)&quot; &quot;$(HarmonyPath)&quot; &quot;$(ChineseConverterPath)&quot; /lib:&quot;$(PluginBuildDir)&quot;" />
+    <Exec Command="&quot;$(ILRepackExe)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(PluginInputPath)&quot; &quot;$(HarmonyPath)&quot; &quot;$(ChineseConverterPath)&quot; /lib:&quot;$(PluginBuildDir)&quot; /lib:&quot;$(PkgLib_Harmony)\lib\net6.0&quot;" />
   </Target>
 </Project>
