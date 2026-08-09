@@ -15,6 +15,7 @@ namespace StrmAssistant.Compatibility
     {
         public int TargetsFound { get; set; }
         public int TargetsPatched { get; set; }
+        public bool UserDataPropertyFound { get; set; }
         public bool UnplayedItemCountPropertyFound { get; set; }
         public List<string> Targets { get; set; } = new List<string>();
         public string Error { get; set; }
@@ -38,9 +39,12 @@ namespace StrmAssistant.Compatibility
 
         public void Run()
         {
+            var userDataProperty = typeof(BaseItemDto).GetProperty("UserData");
+            var userDataType = userDataProperty?.PropertyType;
             var status = new EpisodeCountDtoCapabilityStatus
             {
-                UnplayedItemCountPropertyFound = typeof(BaseItemDto).GetProperty("UnplayedItemCount") != null
+                UserDataPropertyFound = userDataProperty != null,
+                UnplayedItemCountPropertyFound = userDataType?.GetProperty("UnplayedItemCount") != null
             };
             EpisodeCountDtoModState.Status = status;
 
@@ -132,7 +136,7 @@ namespace StrmAssistant.Compatibility
 
         private static void Apply(BaseItem item, BaseItemDto dto)
         {
-            if (LibraryManager == null || item == null || dto == null) return;
+            if (LibraryManager == null || item == null || dto == null || dto.UserData == null) return;
             int count;
             if (item is Series series)
                 count = CountSeriesEpisodes(series, null);
@@ -142,7 +146,7 @@ namespace StrmAssistant.Compatibility
                 return;
 
             if (count < 0) return;
-            SetCount(dto, count);
+            SetCount(dto.UserData, count);
         }
 
         private static int CountSeriesEpisodes(Series series, int? seasonNumber)
@@ -167,13 +171,17 @@ namespace StrmAssistant.Compatibility
             }
         }
 
-        private static void SetCount(BaseItemDto dto, int count)
+        private static void SetCount(object userData, int count)
         {
-            var property = dto.GetType().GetProperty("UnplayedItemCount",
+            if (userData == null) return;
+            var property = userData.GetType().GetProperty("UnplayedItemCount",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (property?.CanWrite != true) return;
-            var targetType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
-            property.SetValue(dto, Convert.ChangeType(count, targetType));
+
+            var underlying = Nullable.GetUnderlyingType(property.PropertyType);
+            var targetType = underlying ?? property.PropertyType;
+            var converted = Convert.ChangeType(count, targetType);
+            property.SetValue(userData, underlying == null ? converted : Activator.CreateInstance(property.PropertyType, converted));
         }
 
         private static bool Enabled()
