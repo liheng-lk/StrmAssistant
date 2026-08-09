@@ -2,6 +2,7 @@ using MediaBrowser.Controller.Api;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
+using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Model.Serialization;
 using MediaBrowser.Model.Services;
 using StrmAssistant.MediaEnhance;
@@ -22,6 +23,21 @@ namespace StrmAssistant.Api
     public sealed class GetOpticalProbeItem : IReturn<OpticalProbeResponse>
     {
         public string Id { get; set; }
+    }
+
+    [Route("/StrmAssistant/OpticalProbe/{Id}/WritebackPlan", "GET", Summary = "Preview ISO/BDMV MediaInfo write-back")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class GetOpticalWriteBackPlan : IReturn<OpticalWriteBackResponse>
+    {
+        public string Id { get; set; }
+    }
+
+    [Route("/StrmAssistant/OpticalProbe/{Id}/Apply", "POST", Summary = "Apply confirmed ISO/BDMV MediaInfo write-back")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class ApplyOpticalWriteBack : IReturn<OpticalWriteBackResponse>
+    {
+        public string Id { get; set; }
+        public bool Confirm { get; set; }
     }
 
     public sealed class OpticalProbeHealthResponse
@@ -52,19 +68,37 @@ namespace StrmAssistant.Api
         public List<OpticalProbeChapterInfo> Chapters { get; set; } = new List<OpticalProbeChapterInfo>();
     }
 
+    public sealed class OpticalWriteBackResponse
+    {
+        public bool Success { get; set; }
+        public bool Executed { get; set; }
+        public bool WriteBackEnabled { get; set; }
+        public bool RolledBack { get; set; }
+        public string Error { get; set; }
+        public string ItemId { get; set; }
+        public string ItemName { get; set; }
+        public string Kind { get; set; }
+        public OpticalWriteBackPlan Plan { get; set; }
+        public int SavedStreamCount { get; set; }
+        public int SavedChapterCount { get; set; }
+    }
+
     /// <summary>
-    /// Read-only test surface for the Phase 2 optical-media pipeline. No media streams,
-    /// chapters or BaseItem fields are changed by these endpoints.
+    /// Admin-only Phase 2 optical-media surface. Probe and plan endpoints are read-only.
+    /// Write-back requires both the plugin option and Confirm=true for every individual item.
     /// </summary>
     public sealed class OpticalMediaProbeApiService : BaseApiService
     {
         private readonly ILibraryManager _libraryManager;
         private readonly OpticalMediaProbe _probe;
+        private readonly OpticalMediaWriteBack _writeBack;
 
-        public OpticalMediaProbeApiService(ILibraryManager libraryManager, IJsonSerializer jsonSerializer)
+        public OpticalMediaProbeApiService(ILibraryManager libraryManager, IItemRepository itemRepository,
+            IJsonSerializer jsonSerializer)
         {
             _libraryManager = libraryManager;
             _probe = new OpticalMediaProbe(jsonSerializer);
+            _writeBack = new OpticalMediaWriteBack(libraryManager, itemRepository, jsonSerializer);
         }
 
         public async Task<object> Get(GetOpticalProbeHealth request)
@@ -98,7 +132,73 @@ namespace StrmAssistant.Api
 
             var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
             var result = await _probe.ProbeAsync(item, options, CancellationToken.None).ConfigureAwait(false);
+            return ToProbeResponse(item, result);
+        }
 
+        public async Task<object> Get(GetOpticalWriteBackPlan request)
+        {
+            var item = ResolveVideo(request?.Id);
+            if (item == null) return WriteBackError(request?.Id, "Video item was not found.");
+
+            var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
+            var probeResult = await _probe.ProbeAsync(item, options, CancellationToken.None).ConfigureAwait(false);
+            var plan = _writeBack.BuildPlan(item, probeResult);
+
+            return new OpticalWriteBackResponse
+            {
+                Success = plan.Valid,
+                Executed = false,
+                WriteBackEnabled = options?.EnableOpticalMediaWriteBack == true,
+                Error = plan.Error,
+                ItemId = item.InternalId.ToString(),
+                ItemName = item.Name,
+                Kind = probeResult.Kind,
+                Plan = plan
+            };
+        }
+
+        public async Task<object> Post(ApplyOpticalWriteBack request)
+        {
+            var item = ResolveVideo(request?.Id);
+            if (item == null) return WriteBackError(request?.Id, "Video item was not found.");
+
+            var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
+            if (options?.EnableOpticalMediaProbe != true)
+                return WriteBackError(request.Id, "ISO / BDMV optical probing is disabled.");
+            if (!options.EnableOpticalMediaWriteBack)
+                return WriteBackError(request.Id, "ISO / BDMV write-back is disabled in plugin options.");
+            if (request == null || !request.Confirm)
+                return WriteBackError(item.InternalId.ToString(),
+                    "Write-back was not confirmed. Review WritebackPlan first, then submit Confirm=true.");
+
+            var probeResult = await _probe.ProbeAsync(item, options, CancellationToken.None).ConfigureAwait(false);
+            var writeResult = _writeBack.Apply(item, probeResult);
+
+            return new OpticalWriteBackResponse
+            {
+                Success = writeResult.Success,
+                Executed = writeResult.Success,
+                WriteBackEnabled = true,
+                RolledBack = writeResult.RolledBack,
+                Error = writeResult.Error,
+                ItemId = item.InternalId.ToString(),
+                ItemName = item.Name,
+                Kind = probeResult.Kind,
+                Plan = writeResult.Plan,
+                SavedStreamCount = writeResult.SavedStreamCount,
+                SavedChapterCount = writeResult.SavedChapterCount
+            };
+        }
+
+        private Video ResolveVideo(string id)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return null;
+            if (!long.TryParse(id, out var internalId)) return null;
+            return _libraryManager.GetItemById(internalId) as Video;
+        }
+
+        private static OpticalProbeResponse ToProbeResponse(Video item, OpticalProbeResult result)
+        {
             return new OpticalProbeResponse
             {
                 Success = result.Success,
@@ -118,11 +218,15 @@ namespace StrmAssistant.Api
             };
         }
 
-        private Video ResolveVideo(string id)
+        private static OpticalWriteBackResponse WriteBackError(string itemId, string error)
         {
-            if (string.IsNullOrWhiteSpace(id)) return null;
-            if (!long.TryParse(id, out var internalId)) return null;
-            return _libraryManager.GetItemById(internalId) as Video;
+            return new OpticalWriteBackResponse
+            {
+                Success = false,
+                Executed = false,
+                ItemId = itemId,
+                Error = error
+            };
         }
     }
 }
