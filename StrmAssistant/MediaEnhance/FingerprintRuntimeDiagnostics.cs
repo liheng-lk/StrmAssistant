@@ -20,23 +20,39 @@ namespace StrmAssistant.MediaEnhance
         public bool TimeoutPatchAvailable { get; set; }
         public string EmbyApplicationVersion { get; set; }
         public bool DistributedFingerprintRoutingEnabled { get; set; }
+        public string DistributedFingerprintExecutable { get; set; }
+        public bool DistributedFingerprintFallbackToEmby { get; set; }
+        public bool DistributedFingerprintForStrm { get; set; }
+        public bool DistributedFingerprintExecutableConfigured { get; set; }
         public string Note { get; set; }
     }
 
     /// <summary>
     /// Read-only reflection diagnostics around the already-initialized FingerprintApi.
-    /// This intentionally does not instantiate private Emby types or modify fingerprint files.
+    /// It reports routing configuration but never generates or modifies a real fingerprint.
     /// </summary>
     public sealed class FingerprintRuntimeDiagnostics
     {
         public FingerprintRuntimeCapabilityResult Inspect(FingerprintApi fingerprintApi)
         {
+            var pluginOptions = Plugin.Instance?.GetPluginOptions();
+            var introOptions = pluginOptions?.IntroSkipOptions;
+            var mediaOptions = pluginOptions?.MediaInfoExtractOptions;
+            var executable = mediaOptions?.DistributedFfmpegExecutablePath?.Trim().Trim('"');
+            var routingEnabled = introOptions?.EnableDistributedFingerprintRouting == true;
+
             var result = new FingerprintRuntimeCapabilityResult
             {
                 FingerprintApiAvailable = fingerprintApi != null,
                 EmbyApplicationVersion = Plugin.Instance?.ApplicationHost?.ApplicationVersion?.ToString(),
-                DistributedFingerprintRoutingEnabled = false,
-                Note = "Diagnostics only. Distributed fingerprint routing is intentionally disabled until the native runtime contract and Chromaprint worker behavior are verified."
+                DistributedFingerprintRoutingEnabled = routingEnabled,
+                DistributedFingerprintExecutable = executable,
+                DistributedFingerprintExecutableConfigured = !string.IsNullOrWhiteSpace(executable),
+                DistributedFingerprintFallbackToEmby = introOptions?.DistributedFingerprintFallbackToEmby != false,
+                DistributedFingerprintForStrm = introOptions?.EnableDistributedFingerprintForStrm == true,
+                Note = routingEnabled
+                    ? "Distributed routing is configured to create an isolated native AudioFingerprintManager whose ffmpeg path is overridden through interface proxies. Emby's global ffmpeg configuration is not modified. Runtime worker/path/Chromaprint verification is still required."
+                    : "Distributed fingerprint routing is disabled. Native Emby fingerprint execution remains active."
             };
 
             if (fingerprintApi == null) return result;
@@ -68,6 +84,11 @@ namespace StrmAssistant.MediaEnhance
                 result.UpdateSequencesForSeasonAvailable = updateSequencesForSeason != null;
                 result.UpdateSequencesForSeasonSignature = updateSequencesForSeason?.ToString();
                 result.TimeoutPatchAvailable = timeoutField != null;
+
+                if (routingEnabled && string.IsNullOrWhiteSpace(executable))
+                {
+                    result.Note += " No distributed ffmpeg executable is currently configured, so runtime routing will either fall back to native Emby or refuse the task according to the fallback setting.";
+                }
             }
             catch (Exception ex)
             {
