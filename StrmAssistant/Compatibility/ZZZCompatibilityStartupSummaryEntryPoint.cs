@@ -34,17 +34,20 @@ namespace StrmAssistant.Compatibility
                 var thumbnail = VideoThumbnail410CompatibilityState.Status;
                 var assembly = AssemblyResolutionCompatibilityState.Status;
                 var multiVersion = MultiVersionDisplayModState.Status;
+                var pluginVersion = typeof(Plugin).Assembly.GetName().Version?.ToString() ?? "unknown";
 
                 logger.Info(
-                    "CompatibilitySummary - Emby={0}; Band={1}; Detect={2}; " +
-                    "MediaInfo={3}/{4}; Fingerprint={5}/{6} native={7}/{8}; " +
-                    "StrmMount={9}/{10} arg={11}; Thumbnail={12}/{13} nativeArgs={14}; " +
-                    "ChineseSearch={15}/{16} target={17}; MultiVersion={18}/{19}; MovieDbLoaded={20}",
+                    "CompatibilitySummary - Plugin={0}; Emby={1}; Band={2}; Detect={3}; " +
+                    "MediaInfo={4}/{5} nativeArgs={6}; Fingerprint={7}/{8} native={9}/{10}; " +
+                    "StrmMount={11}/{12} arg={13}; Thumbnail={14}/{15} nativeArgs={16}; " +
+                    "ChineseSearch={17}/{18} target={19}; MultiVersion={20}/{21}; MovieDbLoaded={22}",
+                    pluginVersion,
                     emby.ServerVersion?.ToString() ?? "unknown",
                     emby.Band,
                     emby.DetectionSource ?? "unknown",
                     mediaInfo?.TargetFound == true,
                     mediaInfo?.Patched == true || mediaInfo?.ReflectionStaticMediaSourceAvailable == true,
+                    mediaInfo?.RuntimeStaticMediaSourceParameterCount ?? 0,
                     fingerprint?.SeasonFingerprintTargetFound == true && fingerprint?.UpdateSequenceTargetFound == true,
                     fingerprint?.SeasonFingerprintPatched == true && fingerprint?.UpdateSequencePatched == true,
                     fingerprint?.NativeSeasonFingerprintParameterCount ?? 0,
