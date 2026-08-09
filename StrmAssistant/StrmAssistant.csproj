@@ -12,7 +12,6 @@
     <PluginOutputPath>$(PluginOutputDir)\$(AssemblyName).dll</PluginOutputPath>
     <PluginInputPath>$(PluginBuildDir)\$(AssemblyName).dll</PluginInputPath>
     <ChineseConverterPath>$(PluginBuildDir)\ChineseConverter.dll</ChineseConverterPath>
-    <HarmonyPath>$(PluginBuildDir)\0Harmony.dll</HarmonyPath>
     <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' == 'Windows_NT'">$(UserProfile)\.dotnet\tools\ilrepack.exe</ILRepackExe>
     <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' != 'Windows_NT'">$(HOME)/.dotnet/tools/ilrepack</ILRepackExe>
   </PropertyGroup>
@@ -32,7 +31,7 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Lib.Harmony" Version="2.3.6" />
+    <PackageReference Include="Lib.Harmony" Version="2.3.6" GeneratePathProperty="true" />
     <PackageReference Include="mediabrowser.server.core" Version="$(EmbyServerCoreVersion)" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
       <PrivateAssets>all</PrivateAssets>
@@ -60,10 +59,13 @@
     </EmbeddedResource>
   </ItemGroup>
   <Target Name="PackagePlugin" DependsOnTargets="Build">
+    <PropertyGroup>
+      <HarmonyPath>$(PkgLib_Harmony)\lib\netstandard2.0\0Harmony.dll</HarmonyPath>
+    </PropertyGroup>
     <Error Condition="!Exists('$(ILRepackExe)')" Text="ILRepack tool not found at $(ILRepackExe). Install it with: dotnet tool install -g dotnet-ilrepack" />
     <Error Condition="!Exists('$(PluginInputPath)')" Text="Plugin input not found at $(PluginInputPath)" />
     <Error Condition="!Exists('$(ChineseConverterPath)')" Text="ChineseConverter input not found at $(ChineseConverterPath)" />
-    <Error Condition="!Exists('$(HarmonyPath)')" Text="Harmony input not found at $(HarmonyPath)" />
+    <Error Condition="!Exists('$(HarmonyPath)')" Text="Harmony input not found at $(HarmonyPath) (PkgLib_Harmony=$(PkgLib_Harmony))" />
     <MakeDir Directories="$(PluginOutputDir)" />
     <Exec Command="&quot;$(ILRepackExe)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(PluginInputPath)&quot; &quot;$(HarmonyPath)&quot; &quot;$(ChineseConverterPath)&quot; /lib:&quot;$(PluginBuildDir)&quot;" />
   </Target>
