@@ -1,8 +1,8 @@
+using Emby.Notifications;
 using HarmonyLib;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.Notifications;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Entities;
 using StrmAssistant.Common;
@@ -151,9 +151,6 @@ namespace StrmAssistant.Compatibility
                 if (general?.CatchupMode != true || media?.EnableImageCapture != true) return false;
                 if (string.IsNullOrWhiteSpace(general.CatchupTaskScope) ||
                     general.CatchupTaskScope.IndexOf("MediaInfo", StringComparison.OrdinalIgnoreCase) < 0) return false;
-
-                // Start delaying only when this exact item is still in the catch-up queue. This
-                // prevents unrelated running MediaInfo work from delaying every library notice.
                 if (!QueueManager.MediaInfoExtractItemQueue.Any(value => value?.InternalId == item.InternalId)) return false;
                 return IsImageWorkStillNeeded(item);
             }
@@ -225,7 +222,6 @@ namespace StrmAssistant.Compatibility
             }
             catch (OperationCanceledException)
             {
-                // Server shutdown / caller cancellation: match the native cancellation contract.
             }
             catch (Exception ex)
             {
