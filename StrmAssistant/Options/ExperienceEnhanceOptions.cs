@@ -123,6 +123,12 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(MergeMultiVersion), SimpleCondition.IsTrue)]
         public MergeMoviesScopeOption MergeMoviesPreference { get; set; } = MergeMoviesScopeOption.LibraryScope;
 
+        [DisplayName("每组最多合并电影版本数")]
+        [Description("0 表示不限数量（默认），不会使用固定 8 个版本限制。设置大于 0 时仅合并排序后的前 N 个版本，其余版本保持独立。")]
+        [Required, MinValue(0)]
+        [VisibleCondition(nameof(MergeMultiVersion), SimpleCondition.IsTrue)]
+        public int MaxMergedMovieVersions { get; set; } = 0;
+
         public enum MergeSeriesScopeOption
         {
             [DescriptionL("MergeScopeOption_LibraryScope_LibraryScope", typeof(Resources))]
