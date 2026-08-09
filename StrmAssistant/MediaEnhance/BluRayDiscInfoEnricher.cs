@@ -1,15 +1,18 @@
+using MediaBrowser.Common;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.MediaInfo;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 
 namespace StrmAssistant.MediaEnhance
 {
     public sealed class BluRayDiscEnrichmentSummary
     {
+        public bool Available { get; set; }
         public bool Attempted { get; set; }
         public bool Applied { get; set; }
         public string PlaylistName { get; set; }
@@ -20,23 +23,51 @@ namespace StrmAssistant.MediaEnhance
     }
 
     /// <summary>
-    /// Uses Emby's own Blu-ray examiner for BDMV folders. For multi-M2TS playlists,
-    /// BDInfo is authoritative for stream language/layout and chapter positions while
-    /// ffprobe remains the fallback for video dimensions/bitrate when BDInfo omits them.
+    /// Runtime-optional bridge to Emby's Blu-ray examiner. Some Emby SDK generations
+    /// do not expose IBlurayExaminer at compile time, so the capability is resolved by
+    /// reflection and instantiated through IApplicationHost.CreateInstance(Type).
     /// </summary>
     public sealed class BluRayDiscInfoEnricher
     {
-        private readonly IBlurayExaminer _blurayExaminer;
+        private const string ExaminerInterfaceName = "MediaBrowser.Model.MediaInfo.IBlurayExaminer";
+        private readonly object _examiner;
+        private readonly MethodInfo _getDiscInfo;
 
-        public BluRayDiscInfoEnricher(IBlurayExaminer blurayExaminer)
+        public BluRayDiscInfoEnricher(IApplicationHost applicationHost)
         {
-            _blurayExaminer = blurayExaminer;
+            if (applicationHost == null) return;
+
+            try
+            {
+                LoadCandidateAssemblies();
+                var interfaceType = FindType(ExaminerInterfaceName);
+                if (interfaceType == null) return;
+
+                var implementationType = AppDomain.CurrentDomain.GetAssemblies()
+                    .SelectMany(SafeGetTypes)
+                    .FirstOrDefault(type => type != null && !type.IsAbstract && !type.IsInterface &&
+                                            interfaceType.IsAssignableFrom(type));
+                if (implementationType == null) return;
+
+                _examiner = applicationHost.CreateInstance(implementationType);
+                _getDiscInfo = interfaceType.GetMethod("GetDiscInfo", new[] { typeof(string) }) ??
+                               implementationType.GetMethod("GetDiscInfo", new[] { typeof(string) });
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance?.Logger?.Debug("BluRayDiscInfoEnricher init failed: " + ex.Message);
+                Plugin.Instance?.Logger?.Debug(ex.StackTrace);
+            }
         }
 
         public BluRayDiscEnrichmentSummary Enrich(Video item, OpticalProbeResult probeResult)
         {
-            var summary = new BluRayDiscEnrichmentSummary();
-            if (item == null || probeResult == null || !probeResult.Success || _blurayExaminer == null)
+            var summary = new BluRayDiscEnrichmentSummary
+            {
+                Available = _examiner != null && _getDiscInfo != null
+            };
+
+            if (item == null || probeResult == null || !probeResult.Success || !summary.Available)
                 return summary;
 
             if (OpticalMediaProbe.GetMediaKind(item) != OpticalMediaKind.BluRayDirectory)
@@ -52,60 +83,40 @@ namespace StrmAssistant.MediaEnhance
 
             try
             {
-                var discInfo = _blurayExaminer.GetDiscInfo(path);
+                var discInfo = _getDiscInfo.Invoke(_examiner, new object[] { path });
                 if (discInfo == null)
                 {
                     summary.Error = "Emby Blu-ray examiner returned no disc information.";
                     return summary;
                 }
 
-                summary.PlaylistName = discInfo.PlaylistName;
-                summary.PlayableFiles = discInfo.Files?.Where(file => !string.IsNullOrWhiteSpace(file)).ToList()
-                                        ?? new List<string>();
-                summary.DiscStreamCount = discInfo.MediaStreams?.Length ?? 0;
-                summary.DiscChapterCount = discInfo.Chapters?.Length ?? 0;
+                summary.PlaylistName = ReadValue(discInfo, "PlaylistName")?.ToString();
+                summary.PlayableFiles = ReadStrings(discInfo, "Files");
+                var discStreams = ReadMediaStreams(discInfo, "MediaStreams");
+                var discChapters = ReadDoubles(discInfo, "Chapters");
+                summary.DiscStreamCount = discStreams.Count;
+                summary.DiscChapterCount = discChapters.Count;
 
-                // Emby itself only replaces ffprobe streams with BDInfo for multi-file playlists.
-                if (summary.PlayableFiles.Count <= 1 || summary.DiscStreamCount == 0)
+                // Match Emby's own policy: multi-file Blu-ray playlists use BDInfo as the
+                // authoritative stream/chapter source, with ffprobe filling video gaps.
+                if (summary.PlayableFiles.Count <= 1 || discStreams.Count == 0)
                     return summary;
 
                 var ffprobeVideo = probeResult.Streams?
                     .FirstOrDefault(stream => string.Equals(stream.Type, "video", StringComparison.OrdinalIgnoreCase));
-
-                var enrichedStreams = discInfo.MediaStreams
-                    .Select(ToProbeStream)
-                    .ToList();
-
+                var enrichedStreams = discStreams.Select(ToProbeStream).ToList();
                 var enrichedVideo = enrichedStreams
                     .FirstOrDefault(stream => string.Equals(stream.Type, "video", StringComparison.OrdinalIgnoreCase));
-                if (enrichedVideo != null && ffprobeVideo != null)
-                {
-                    if (!enrichedVideo.Width.HasValue || enrichedVideo.Width.Value == 0)
-                        enrichedVideo.Width = ffprobeVideo.Width;
-                    if (!enrichedVideo.Height.HasValue || enrichedVideo.Height.Value == 0)
-                        enrichedVideo.Height = ffprobeVideo.Height;
-                    if (!enrichedVideo.BitRate.HasValue || enrichedVideo.BitRate.Value == 0)
-                        enrichedVideo.BitRate = ffprobeVideo.BitRate;
-                    if (!enrichedVideo.AverageFrameRate.HasValue)
-                        enrichedVideo.AverageFrameRate = ffprobeVideo.AverageFrameRate;
-                    if (string.IsNullOrWhiteSpace(enrichedVideo.PixelFormat))
-                        enrichedVideo.PixelFormat = ffprobeVideo.PixelFormat;
-                    if (string.IsNullOrWhiteSpace(enrichedVideo.ColorTransfer))
-                        enrichedVideo.ColorTransfer = ffprobeVideo.ColorTransfer;
-                    if (string.IsNullOrWhiteSpace(enrichedVideo.ColorPrimaries))
-                        enrichedVideo.ColorPrimaries = ffprobeVideo.ColorPrimaries;
-                    if (string.IsNullOrWhiteSpace(enrichedVideo.ColorSpace))
-                        enrichedVideo.ColorSpace = ffprobeVideo.ColorSpace;
-                }
 
+                FillVideoGaps(enrichedVideo, ffprobeVideo);
                 probeResult.Streams = enrichedStreams;
 
-                if (discInfo.RunTimeTicks.HasValue && discInfo.RunTimeTicks.Value > 0)
-                    probeResult.RunTimeTicks = discInfo.RunTimeTicks;
+                var runtime = ReadNullableLong(discInfo, "RunTimeTicks");
+                if (runtime.HasValue && runtime.Value > 0) probeResult.RunTimeTicks = runtime;
 
-                if (discInfo.Chapters != null && discInfo.Chapters.Length > 0)
+                if (discChapters.Count > 0)
                 {
-                    probeResult.Chapters = discInfo.Chapters
+                    probeResult.Chapters = discChapters
                         .Where(seconds => seconds >= 0 && !double.IsNaN(seconds) && !double.IsInfinity(seconds))
                         .Select((seconds, index) => new OpticalProbeChapterInfo
                         {
@@ -120,12 +131,29 @@ namespace StrmAssistant.MediaEnhance
                                       probeResult.RunTimeTicks.HasValue;
                 summary.Applied = true;
             }
+            catch (TargetInvocationException ex)
+            {
+                summary.Error = ex.InnerException?.Message ?? ex.Message;
+            }
             catch (Exception ex)
             {
                 summary.Error = ex.Message;
             }
 
             return summary;
+        }
+
+        private static void FillVideoGaps(OpticalProbeStreamInfo target, OpticalProbeStreamInfo fallback)
+        {
+            if (target == null || fallback == null) return;
+            if (!target.Width.HasValue || target.Width.Value == 0) target.Width = fallback.Width;
+            if (!target.Height.HasValue || target.Height.Value == 0) target.Height = fallback.Height;
+            if (!target.BitRate.HasValue || target.BitRate.Value == 0) target.BitRate = fallback.BitRate;
+            if (!target.AverageFrameRate.HasValue) target.AverageFrameRate = fallback.AverageFrameRate;
+            if (string.IsNullOrWhiteSpace(target.PixelFormat)) target.PixelFormat = fallback.PixelFormat;
+            if (string.IsNullOrWhiteSpace(target.ColorTransfer)) target.ColorTransfer = fallback.ColorTransfer;
+            if (string.IsNullOrWhiteSpace(target.ColorPrimaries)) target.ColorPrimaries = fallback.ColorPrimaries;
+            if (string.IsNullOrWhiteSpace(target.ColorSpace)) target.ColorSpace = fallback.ColorSpace;
         }
 
         private static OpticalProbeStreamInfo ToProbeStream(MediaStream stream)
@@ -152,6 +180,107 @@ namespace StrmAssistant.MediaEnhance
                 IsDefault = stream.IsDefault,
                 IsForced = stream.IsForced
             };
+        }
+
+        private static object ReadValue(object target, string propertyName)
+        {
+            return target?.GetType().GetProperty(propertyName,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(target);
+        }
+
+        private static List<string> ReadStrings(object target, string propertyName)
+        {
+            return (ReadValue(target, propertyName) as IEnumerable)?.Cast<object>()
+                       .Select(value => value?.ToString())
+                       .Where(value => !string.IsNullOrWhiteSpace(value))
+                       .ToList() ?? new List<string>();
+        }
+
+        private static List<MediaStream> ReadMediaStreams(object target, string propertyName)
+        {
+            return (ReadValue(target, propertyName) as IEnumerable)?.Cast<object>()
+                       .OfType<MediaStream>()
+                       .ToList() ?? new List<MediaStream>();
+        }
+
+        private static List<double> ReadDoubles(object target, string propertyName)
+        {
+            var values = new List<double>();
+            if (!(ReadValue(target, propertyName) is IEnumerable enumerable)) return values;
+
+            foreach (var value in enumerable)
+            {
+                try
+                {
+                    values.Add(Convert.ToDouble(value, System.Globalization.CultureInfo.InvariantCulture));
+                }
+                catch
+                {
+                    // ignore malformed chapter entries
+                }
+            }
+
+            return values;
+        }
+
+        private static long? ReadNullableLong(object target, string propertyName)
+        {
+            var value = ReadValue(target, propertyName);
+            if (value == null) return null;
+            try
+            {
+                return Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static Type FindType(string fullName)
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var type = assembly.GetType(fullName, false);
+                if (type != null) return type;
+            }
+
+            return null;
+        }
+
+        private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+        {
+            try
+            {
+                return assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                return ex.Types.Where(type => type != null);
+            }
+            catch
+            {
+                return Array.Empty<Type>();
+            }
+        }
+
+        private static void LoadCandidateAssemblies()
+        {
+            foreach (var name in new[]
+                     {
+                         "MediaBrowser.Model", "MediaBrowser.Controller", "Emby.Providers",
+                         "Emby.Server.Implementations", "MediaBrowser.MediaEncoding"
+                     })
+            {
+                try
+                {
+                    Assembly.Load(name);
+                }
+                catch
+                {
+                    // Optional runtime assembly.
+                }
+            }
         }
 
         private static string ResolveDiscRoot(string path)
