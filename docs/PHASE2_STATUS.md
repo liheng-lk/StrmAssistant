@@ -2,7 +2,7 @@
 
 This document tracks implementation and validation of the media-enhancement portion of the full-feature roadmap.
 
-Compile/package success is **not** treated as runtime verification. Features that touch ffprobe, rffmpeg, mounted paths, Blu-ray parsing or Emby database state remain gated until tested on a disposable real server.
+Compile/package success is **not** treated as runtime verification. Features that touch ffprobe, ffmpeg, rffmpeg, mounted paths, Blu-ray parsing or Emby database/image state remain gated until tested on a disposable real server.
 
 ## Implemented in source
 
@@ -55,10 +55,34 @@ Compile/package success is **not** treated as runtime verification. Features tha
 - [x] Multi-M2TS BDMV playlists use Emby Blu-ray examiner output for stream language/layout, runtime and chapters when available.
 - [x] ffprobe video width/height/bitrate/frame/color information fills BDInfo gaps.
 - [x] Emby 4.8 automatically degrades to ffprobe-only when the Blu-ray examiner interface is absent.
+- [x] Cross-platform ffprobe path quoting without rewriting native path separators.
 - [ ] DVD ISO integration.
 - [ ] Real Blu-ray ISO runtime verification.
 - [ ] Real multi-M2TS BDMV runtime verification.
-- [ ] ISO/BDMV image capture and BIF/chapter-image generation.
+
+### Custom / optical image capture
+
+- [x] Explicit custom-image-capture switch; default off.
+- [x] Configurable local custom ffmpeg executable without modifying Emby's global encoder path.
+- [x] Optional use of the configured distributed ffmpeg/rffmpeg wrapper.
+- [x] Configurable capture timeout.
+- [x] Capture position calculated as a percentage of probed/item runtime.
+- [x] Admin-only per-item Plan endpoint; Plan performs no image save.
+- [x] Admin-only Apply endpoint requiring `Confirm=true`.
+- [x] Existing primary image is protected unless `ReplaceExistingPrimaryImage=true` is explicitly supplied.
+- [x] STRM capture requires explicit target resolution.
+- [x] Blu-ray ISO/BDMV capture reuses the optical probe pipeline.
+- [x] Multi-file BDMV can pass the BDInfo/MPLS playlist number to ffmpeg.
+- [x] Blu-ray capture uses the FFmpeg `bluray:` input path when applicable.
+- [x] Successful capture is written through Emby's `IProviderManager.SaveImage` as the primary image.
+- [x] Temporary capture files are cleaned up best-effort.
+- [x] Distributed capture refuses to save if ffmpeg exits successfully but the generated image is not visible back on the Emby host.
+- [ ] Real local normal-video capture test.
+- [ ] Real Blu-ray ISO/BDMV capture test.
+- [ ] Real rffmpeg capture test proving output-file synchronization back to the Emby host.
+- [ ] Aspect-ratio post-processing presets.
+- [ ] Automatic/batch capture integration.
+- [ ] BIF/chapter-image generation through the custom/distributed ffmpeg path.
 
 ### Distributed MediaInfo extraction / rffmpeg
 
@@ -84,16 +108,17 @@ Compile/package success is **not** treated as runtime verification. Features tha
 - [x] Best-effort rollback on write-back failure.
 - [x] Existing QueueManager concurrency still limits distributed MediaInfo jobs.
 - [x] External subtitle/audio rescan and MediaInfo JSON persistence continue after a successful distributed extract.
+- [x] Custom image capture can opt into the distributed ffmpeg executable with local-output verification.
 - [ ] Real rffmpeg worker routing test with a shared media path.
 - [ ] Real multi-worker load-balancing test.
 - [ ] Shared-path/permission diagnostics beyond an actual ffprobe Probe request.
-- [ ] Route image capture/BIF/fingerprint work through distributed ffmpeg.
+- [ ] Route BIF/fingerprint work through distributed ffmpeg.
 - [ ] Central-server MediaInfo synchronization endpoint/workflow.
 
 ## Remaining Phase 2 work
 
-- [ ] ISO/BDMV image capture.
-- [ ] Custom/distributed ffmpeg image capture and BIF generation.
+- [ ] Aspect-ratio post-processing for captured primary images.
+- [ ] BIF/chapter-image generation through custom/distributed ffmpeg while retaining Emby's thumbnail storage format.
 - [ ] Distributed fingerprint processing through compatible ffmpeg/chromaprint workers.
 - [ ] Central-server MediaInfo synchronization workflow.
 - [ ] Additional music album/artist persistence behavior if runtime testing shows parent metadata is not restored by the current Audio lifecycle.
@@ -109,8 +134,10 @@ The following compatibility milestones are green:
 - Run `31291604737` / #69 — distributed tool health API.
 - Run `31291822556` / #72 — optional distributed MediaInfo routing.
 - Run `31291950394` / #74 — read-only per-item distributed path Probe API.
+- Run `31292091938` / #76 — cross-platform optical ffprobe path quoting hardening.
+- Run `31292295446` / #79 — custom/optical/distributed single-frame image capture and guarded primary-image save.
 
-Latest run #74 passed all matrix targets:
+Latest run #79 passed all matrix targets:
 
 - [x] Emby Core 4.8.0.80 compile/package/artifact.
 - [x] Emby Core 4.9.1.90 compile/package/artifact.
@@ -127,7 +154,10 @@ Latest run #74 passed all matrix targets:
 - [ ] Optical ffprobe Health on the target host.
 - [ ] Real Blu-ray ISO Probe, Plan and Apply test on disposable media.
 - [ ] Real multi-file BDMV BDInfo/MPLS Probe, Plan and Apply test.
+- [ ] Local custom ffmpeg ImageCapture Plan/Apply test.
+- [ ] Blu-ray ISO/BDMV ImageCapture Plan/Apply test.
 - [ ] rffmpeg Health + status test.
 - [ ] Distributed Probe against a path visible with the same spelling on a worker.
 - [ ] Distributed routing success and remote-failure/native-fallback test.
+- [ ] Distributed image capture only after output-file synchronization is confirmed.
 - [ ] STRM distributed routing only after target-path parity is confirmed.
