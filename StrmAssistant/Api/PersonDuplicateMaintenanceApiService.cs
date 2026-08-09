@@ -174,7 +174,7 @@ namespace StrmAssistant.Api
                     {
                         nameof(Movie), nameof(Series), nameof(Season), nameof(Episode), nameof(Video), nameof(Trailer)
                     }
-                }).Count;
+                }).Count();
 
                 result.Candidates.Add(new PersonDuplicateCandidate
                 {
