@@ -131,6 +131,11 @@ namespace StrmAssistant.Options
         [Required]
         public bool DisplayLibraryItemCount { get; set; } = false;
 
+        [DisplayName("日志内容最新优先（实验）")]
+        [Description("在 Emby 管理后台使用日志 Lines API 时，仅把返回的日志行顺序反转为最新行在前；不改日志文件、不改日志文件列表。运行时找不到兼容 API 时自动保持原生行为。")]
+        [Required]
+        public bool DisplayLogLinesNewestFirst { get; set; } = false;
+
         [DisplayName("播完当前集后补记之前有进度的集")]
         [Description("仅在当前 Episode 因 PlaybackFinished 被标记为已播放后，将同剧中更早且存在播放进度但尚未已播放的集标记为已播放。手工切换已播放状态不会触发。")]
         [Required]
