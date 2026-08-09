@@ -25,6 +25,24 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(UnlockIntroSkip), SimpleCondition.IsTrue)]
         public int IntroDetectionFingerprintMinutes { get; set; } = 10;
 
+        [DisplayName("片头声纹使用分布式 ffmpeg（实验）")]
+        [Description("默认关闭。开启后只为本插件创建的 AudioFingerprintManager 注入分布式 ffmpeg/rffmpeg 路径；不会修改 Emby 全局转码器。季级声纹匹配和片头标记仍使用 Emby 原生逻辑。")]
+        [Required]
+        [VisibleCondition(nameof(UnlockIntroSkip), SimpleCondition.IsTrue)]
+        public bool EnableDistributedFingerprintRouting { get; set; } = false;
+
+        [DisplayName("分布式声纹失败时回退 Emby 原生")]
+        [Description("建议保持开启。远端 worker、Chromaprint 或共享路径执行发生异常时，重新使用 Emby 原生 ffmpeg 完成当前声纹流程。")]
+        [Required]
+        [VisibleCondition(nameof(EnableDistributedFingerprintRouting), SimpleCondition.IsTrue)]
+        public bool DistributedFingerprintFallbackToEmby { get; set; } = true;
+
+        [DisplayName("允许 STRM 使用分布式声纹")]
+        [Description("默认关闭。只有确认 STRM 最终媒体路径在 Emby 与 worker 上完全一致时再开启；否则 STRM 自动保留原生声纹路径。")]
+        [Required]
+        [VisibleCondition(nameof(EnableDistributedFingerprintRouting), SimpleCondition.IsTrue)]
+        public bool EnableDistributedFingerprintForStrm { get; set; } = false;
+
         [Browsable(false)]
         public IEnumerable<EditorSelectOption> MarkerEnabledLibraryList { get; set; }
 
