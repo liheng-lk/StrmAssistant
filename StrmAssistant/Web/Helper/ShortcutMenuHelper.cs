@@ -76,6 +76,11 @@ const strmAssistantCommandSource = {
             'zh-hk': '\u6E05\u9664\u5A92\u9AD4\u8CC7\u8A0A',
             'zh-tw': '\u6E05\u9664\u5A92\u9AD4\u8CC7\u8A0A'
         }[locale] || 'Clear MediaInfo');
+        const personDuplicateCommandName = ({
+            'zh-cn': '\u68C0\u67E5/\u6E05\u7406\u91CD\u590D\u4EBA\u7269',
+            'zh-hk': '\u6AA2\u67E5/\u6E05\u7406\u91CD\u8907\u4EBA\u7269',
+            'zh-tw': '\u6AA2\u67E5/\u6E05\u7406\u91CD\u8907\u4EBA\u7269'
+        }[locale] || 'Check/Clear Duplicate Person');
 
         if (options.items?.length === 1 && options.items[0].LibraryOptions && options.items[0].Type === 'VirtualFolder' &&
             options.items[0].CollectionType !== 'boxsets' && options.items[0].CollectionType !== 'playlists') {
@@ -114,6 +119,9 @@ const strmAssistantCommandSource = {
             if (isAdmin && ['Movie', 'Episode', 'Video', 'MusicVideo', 'Audio'].includes(item.Type)) {
                 result.push({ name: clearMediaInfoCommandName, id: 'clear_mediainfo', icon: 'restart_alt' });
             }
+            if (isAdmin && item.Type === 'Person') {
+                result.push({ name: personDuplicateCommandName, id: 'person_duplicates', icon: 'person_remove' });
+            }
             if (item.hasOwnProperty('LockData') && item.Type !== 'CollectionFolder' && isAdmin) {
                 if (item.LockData) {
                     result.push({ name: unlockCommandName, id: 'unlock', icon: 'lock_open' });
@@ -150,6 +158,69 @@ const strmAssistantCommandSource = {
             unlock: 'unlock',
             clear_intro: 'clear_intro'
         };
+        if (command === 'person_duplicates') {
+            return require(['connectionManager', 'loading', 'toast', 'confirm']).then(modules => {
+                const connectionManager = modules[0];
+                const loading = modules[1];
+                const toast = modules[2];
+                const confirm = modules[3];
+                const apiClient = connectionManager.currentApiClient();
+                const selected = items[0];
+                const locale = strmAssistantCommandSource.globalize.getCurrentLocale().toLowerCase();
+                const title = locale === 'zh-cn' ? '\u6E05\u7406\u91CD\u590D\u4EBA\u7269' :
+                    (['zh-hk', 'zh-tw'].includes(locale) ? '\u6E05\u7406\u91CD\u8907\u4EBA\u7269' : 'Clear Duplicate Person');
+                const planUrl = apiClient.getUrl(`StrmAssistant/People/${selected.Id}/Duplicates/Plan`);
+                loading.show();
+                return apiClient.ajax({ type: 'GET', url: planUrl, dataType: 'json' }).then(plan => {
+                    loading.hide();
+                    if (!plan || plan.Success === false) {
+                        toast(plan?.Error || 'Duplicate-person plan failed');
+                        return;
+                    }
+                    const lines = [plan.SelectedName || selected.Name || '', ''];
+                    (plan.MatchedProviderIds || []).forEach(value => lines.push(value));
+                    const candidates = plan.Candidates || [];
+                    if (candidates.length) {
+                        lines.push('');
+                        lines.push('Candidates:');
+                        candidates.forEach(candidate => {
+                            const prefix = candidate.Selected ? '\u2713 KEEP ' : (candidate.PlannedForDeletion ? '\u2717 DELETE ' : '- ');
+                            lines.push(`${prefix}${candidate.Name || ''} [${candidate.Id}] - related: ${candidate.RelatedItemCount || 0}`);
+                        });
+                    }
+                    (plan.Warnings || []).forEach(value => lines.push('! ' + value));
+                    if (!(plan.DeleteIds || []).length) {
+                        toast((plan.Warnings || []).join('\n') || 'No duplicate person found');
+                        return;
+                    }
+                    return confirm({
+                        text: lines.join('\n'),
+                        title: title,
+                        confirmText: strmAssistantCommandSource.globalize.translate('Delete'),
+                        primary: 'cancel'
+                    }).then(() => {
+                        loading.show();
+                        const clearUrl = apiClient.getUrl(`StrmAssistant/People/${selected.Id}/Duplicates/Clear`) + '?Confirm=true';
+                        return apiClient.ajax({
+                            type: 'POST', url: clearUrl, data: {}, dataType: 'json', contentType: 'application/json'
+                        }).then(result => {
+                            loading.hide();
+                            if (result?.Success && result?.Executed) {
+                                toast(title + ' Success');
+                            } else {
+                                toast(result?.Error || title + ' not executed');
+                            }
+                        }).catch(error => {
+                            loading.hide();
+                            toast(error?.message || title + ' failed');
+                        });
+                    });
+                }).catch(error => {
+                    loading.hide();
+                    toast(error?.message || 'Duplicate-person plan failed');
+                });
+            });
+        }
         if (command.startsWith('delver_')) {
             const mediaSourceId = command.replace('delver_', '');
             const mediaSources = items[0].MediaSources || [];
