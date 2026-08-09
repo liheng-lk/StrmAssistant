@@ -3,6 +3,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Configuration;
+using StrmAssistant.Common;
 using StrmAssistant.Experience;
 using System;
 using System.Collections.Generic;
@@ -165,11 +166,15 @@ namespace StrmAssistant.Compatibility
                     return;
 
                 var orderedIds = ForcedUserPreferencesRuntimeSettings.GetLibraryOrderIds();
+                if (orderedIds.Length == 0)
+                    orderedIds = LibraryApi.AdminOrderedViews ?? Array.Empty<string>();
                 if (orderedIds.Length == 0) return;
 
                 var rank = orderedIds
-                    .Select((id, index) => new { id, index })
-                    .ToDictionary(entry => entry.id, entry => entry.index, StringComparer.OrdinalIgnoreCase);
+                    .Select((id, index) => new { id = NormalizeId(id), index })
+                    .Where(entry => !string.IsNullOrWhiteSpace(entry.id))
+                    .GroupBy(entry => entry.id, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(group => group.Key, group => group.First().index, StringComparer.OrdinalIgnoreCase);
                 __result = __result
                     .Select((folder, originalIndex) => new { folder, originalIndex })
                     .OrderBy(entry =>
@@ -187,6 +192,13 @@ namespace StrmAssistant.Compatibility
                 if (Plugin.Instance?.DebugMode == true)
                     Plugin.Instance.Logger.Debug("Forced library order postfix skipped: " + ex.Message);
             }
+        }
+
+        private static string NormalizeId(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            if (Guid.TryParse(value, out var guid)) return guid.ToString("N");
+            return value.Trim().Replace("-", string.Empty);
         }
     }
 }
