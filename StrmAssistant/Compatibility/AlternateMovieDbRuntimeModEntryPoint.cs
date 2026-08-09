@@ -39,6 +39,7 @@ namespace StrmAssistant.Compatibility
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.moviedb-alt";
         private Harmony _harmony;
+        private ResolveEventHandler _movieDbResolveHandler;
 
         public void Run()
         {
@@ -47,22 +48,32 @@ namespace StrmAssistant.Compatibility
 
             try
             {
-                Assembly movieDbAssembly;
-                try
-                {
-                    movieDbAssembly = Assembly.Load("MovieDb");
-                }
-                catch
-                {
-                    movieDbAssembly = AppDomain.CurrentDomain.GetAssemblies()
-                        .FirstOrDefault(a => string.Equals(a.GetName().Name, "MovieDb", StringComparison.Ordinal));
-                }
-
+                var movieDbAssembly = TryLoad("MovieDb");
                 if (movieDbAssembly == null)
                 {
                     status.Error = "MovieDb plugin assembly is not loaded.";
                     return;
                 }
+
+                // Emby 4.10 can load plugin assemblies into a context where a later Assembly.Load("MovieDb")
+                // does not resolve by simple name even though the assembly is already present. Keep a narrow
+                // AppDomain resolver in place so the other runtime compatibility modules can bind to the
+                // exact MovieDb assembly Emby has already loaded, without loading a second copy.
+                _movieDbResolveHandler = (sender, args) =>
+                {
+                    try
+                    {
+                        var requested = new AssemblyName(args.Name).Name;
+                        return string.Equals(requested, "MovieDb", StringComparison.OrdinalIgnoreCase)
+                            ? movieDbAssembly
+                            : null;
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                };
+                AppDomain.CurrentDomain.AssemblyResolve += _movieDbResolveHandler;
 
                 status.MovieDbAssemblyLoaded = true;
                 status.MovieDbAssemblyVersion = movieDbAssembly.GetName().Version?.ToString();
@@ -136,6 +147,16 @@ namespace StrmAssistant.Compatibility
             try
             {
                 _harmony?.UnpatchAll(HarmonyId);
+            }
+            catch
+            {
+                // Best effort during plugin shutdown.
+            }
+
+            try
+            {
+                if (_movieDbResolveHandler != null)
+                    AppDomain.CurrentDomain.AssemblyResolve -= _movieDbResolveHandler;
             }
             catch
             {
