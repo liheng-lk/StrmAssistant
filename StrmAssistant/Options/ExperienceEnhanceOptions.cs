@@ -106,6 +106,16 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnablePeopleDisplayFilter), SimpleCondition.IsTrue)]
         public bool HideNonChinesePeopleNames { get; set; } = false;
 
+        [DisplayName("缺集显示增强（实验）")]
+        [Description("将 TMDB / TMDB Episode Group / Local Episode Group 的全季集列表接入 Emby 缺集功能，并尽量保持原 MovieDb provider 的优先级位置。")]
+        [Required]
+        public bool EnhanceMissingEpisodes { get; set; } = false;
+
+        [DisplayName("未匹配剧集标题美化（实验）")]
+        [Description("只在 DTO/UI 返回层为缺少标题的 Episode 生成可读的季/集显示标题，不写入数据库、不覆盖已有 Name。")]
+        [Required]
+        public bool BeautifyMissingEpisodeMetadata { get; set; } = false;
+
         [DisplayNameL("GeneralOptions_MergeMultiVersion_Merge_Multiple_Versions", typeof(Resources))]
         [DescriptionL("GeneralOptions_MergeMultiVersion_Auto_merge_multiple_versions_if_in_the_same_folder_", typeof(Resources))]
         [Required]
