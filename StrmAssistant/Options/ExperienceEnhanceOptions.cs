@@ -121,6 +121,11 @@ namespace StrmAssistant.Options
         [Required]
         public bool BeautifyMultipartTitles { get; set; } = false;
 
+        [DisplayName("播完当前集后补记之前有进度的集")]
+        [Description("仅在当前 Episode 因 PlaybackFinished 被标记为已播放后，将同剧中更早且存在播放进度但尚未已播放的集标记为已播放。手工切换已播放状态不会触发。")]
+        [Required]
+        public bool MarkPriorProgressEpisodesPlayed { get; set; } = false;
+
         [DisplayNameL("GeneralOptions_MergeMultiVersion_Merge_Multiple_Versions", typeof(Resources))]
         [DescriptionL("GeneralOptions_MergeMultiVersion_Auto_merge_multiple_versions_if_in_the_same_folder_", typeof(Resources))]
         [Required]
