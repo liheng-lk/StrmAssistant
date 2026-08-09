@@ -17,6 +17,7 @@ namespace StrmAssistant.Experience
         public bool IncludeFileName { get; set; } = true;
         public bool IncludeContainer { get; set; }
         public string Separator { get; set; } = " · ";
+        public bool IsolateUserDataPerVersion { get; set; }
     }
 
     /// <summary>
@@ -66,7 +67,8 @@ namespace StrmAssistant.Experience
                     "SortHighestQualityFirst=" + _options.SortHighestQualityFirst,
                     "IncludeFileName=" + _options.IncludeFileName,
                     "IncludeContainer=" + _options.IncludeContainer,
-                    "Separator=" + Escape(_options.Separator)
+                    "Separator=" + Escape(_options.Separator),
+                    "IsolateUserDataPerVersion=" + _options.IsolateUserDataPerVersion
                 });
 
                 return Clone(_options);
@@ -206,6 +208,7 @@ namespace StrmAssistant.Experience
                         case "IncludeFileName": result.IncludeFileName = ParseBool(value, true); break;
                         case "IncludeContainer": result.IncludeContainer = ParseBool(value, false); break;
                         case "Separator": result.Separator = Unescape(value); break;
+                        case "IsolateUserDataPerVersion": result.IsolateUserDataPerVersion = ParseBool(value, false); break;
                     }
                 }
             }
@@ -225,7 +228,8 @@ namespace StrmAssistant.Experience
                 SortHighestQualityFirst = value.SortHighestQualityFirst,
                 IncludeFileName = value.IncludeFileName,
                 IncludeContainer = value.IncludeContainer,
-                Separator = string.IsNullOrEmpty(value.Separator) ? " · " : value.Separator.Substring(0, Math.Min(value.Separator.Length, 12))
+                Separator = string.IsNullOrEmpty(value.Separator) ? " · " : value.Separator.Substring(0, Math.Min(value.Separator.Length, 12)),
+                IsolateUserDataPerVersion = value.IsolateUserDataPerVersion
             };
         }
 
