@@ -72,7 +72,7 @@ namespace StrmAssistant.Options
         public string DistributedFfprobeExecutablePath { get; set; } = string.Empty;
 
         [DisplayName("分布式 ffmpeg 路径")]
-        [Description("可填写 rffmpeg 的 ffmpeg 软链接/包装器路径；留空使用 PATH 中的 ffmpeg。可用于截图、后续 BIF/声纹等重任务。")]
+        [Description("可填写 rffmpeg 的 ffmpeg 软链接/包装器路径；留空使用 PATH 中的 ffmpeg。可用于截图、BIF/章节图和声纹等重任务。")]
         [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
         public string DistributedFfmpegExecutablePath { get; set; } = string.Empty;
 
@@ -110,6 +110,24 @@ namespace StrmAssistant.Options
         [Required, MinValue(30), MaxValue(3600)]
         [VisibleCondition(nameof(EnableDistributedExtractRouting), SimpleCondition.IsTrue)]
         public int DistributedExtractTimeoutSeconds { get; set; } = 600;
+
+        [DisplayName("BIF / 章节图使用分布式 ffmpeg（实验）")]
+        [Description("默认关闭。开启后先用配置的 ffmpeg/rffmpeg 在 Emby 原生 chapters 目录预生成缺失章节 JPEG，再交回 Emby ThumbnailGenerator 完成章节/BIF 保存和清理。")]
+        [Required]
+        [VisibleCondition(nameof(EnableDistributedExtractDiagnostics), SimpleCondition.IsTrue)]
+        public bool EnableDistributedChapterImageRouting { get; set; } = false;
+
+        [DisplayName("章节图失败时回退 Emby 原生")]
+        [Description("建议保持开启。远端 worker 无法访问媒体路径或无法把输出写回 Emby metadata/chapters 目录时，由 Emby 原生 ThumbnailGenerator 继续生成缺失图片。")]
+        [Required]
+        [VisibleCondition(nameof(EnableDistributedChapterImageRouting), SimpleCondition.IsTrue)]
+        public bool DistributedChapterImageFallbackToEmby { get; set; } = true;
+
+        [DisplayName("单张章节图超时（秒）")]
+        [Description("每个章节时间点的 ffmpeg 截图最长运行时间。默认 120 秒。")]
+        [Required, MinValue(10), MaxValue(600)]
+        [VisibleCondition(nameof(EnableDistributedChapterImageRouting), SimpleCondition.IsTrue)]
+        public int DistributedChapterImageTimeoutSeconds { get; set; } = 120;
 
         [DisplayName("自定义 / ISO 截图（实验）")]
         [Description("启用管理员手动 Plan/Apply 单帧截图。支持普通视频以及已启用光盘媒体探测的 Blu-ray ISO/BDMV；不会自动批量覆盖封面。")]
