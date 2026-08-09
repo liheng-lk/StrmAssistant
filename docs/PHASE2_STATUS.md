@@ -82,7 +82,26 @@ Compile/package success is **not** treated as runtime verification. Features tha
 - [ ] Real rffmpeg capture test proving output-file synchronization back to the Emby host.
 - [ ] Aspect-ratio post-processing presets.
 - [ ] Automatic/batch capture integration.
-- [ ] BIF/chapter-image generation through the custom/distributed ffmpeg path.
+
+### Distributed chapter-image / BIF pre-generation
+
+- [x] Optional distributed chapter-image routing; default off.
+- [x] Uses the configured distributed/custom ffmpeg executable without changing Emby's global encoder path.
+- [x] Reproduces Emby's native chapter-image storage path and filename convention under the item's internal `chapters/` metadata directory.
+- [x] Adds the native 15-second offset for a zero-position first chapter to reduce black-frame captures.
+- [x] Generates only missing chapter JPEGs.
+- [x] Updates `ChapterInfo.ImagePath` / `ImageDateModified` for successfully generated files.
+- [x] Verifies the output file is visible and non-empty on the Emby host after ffmpeg exits.
+- [x] Persists generated chapter image references through `IItemRepository.SaveChapters`.
+- [x] Always returns control to Emby's existing `ThumbnailGenerator.RefreshThumbnailImages` after successful/partial pre-generation so native chapter/BIF bookkeeping and stale-image cleanup remain authoritative.
+- [x] Configurable per-frame timeout.
+- [x] Configurable fallback to Emby native generation; fallback is enabled by default.
+- [x] STRM is intentionally kept on the native path in this phase.
+- [x] ISO/BDMV is intentionally kept on the dedicated optical pipeline in this phase.
+- [ ] Real local custom-ffmpeg chapter-image task test.
+- [ ] Real rffmpeg chapter-image task test with worker-visible media and metadata paths.
+- [ ] Confirm BIF/thumbnail-set packaging is correctly finalized by native ThumbnailGenerator after distributed JPEG pre-generation.
+- [ ] Optical ISO/BDMV chapter-image/BIF integration.
 
 ### Distributed MediaInfo extraction / rffmpeg
 
@@ -109,16 +128,17 @@ Compile/package success is **not** treated as runtime verification. Features tha
 - [x] Existing QueueManager concurrency still limits distributed MediaInfo jobs.
 - [x] External subtitle/audio rescan and MediaInfo JSON persistence continue after a successful distributed extract.
 - [x] Custom image capture can opt into the distributed ffmpeg executable with local-output verification.
+- [x] Chapter JPEG computation can be pre-generated through distributed ffmpeg while Emby retains BIF/index/storage authority.
 - [ ] Real rffmpeg worker routing test with a shared media path.
 - [ ] Real multi-worker load-balancing test.
 - [ ] Shared-path/permission diagnostics beyond an actual ffprobe Probe request.
-- [ ] Route BIF/fingerprint work through distributed ffmpeg.
+- [ ] Distributed fingerprint work through ffmpeg/chromaprint.
 - [ ] Central-server MediaInfo synchronization endpoint/workflow.
 
 ## Remaining Phase 2 work
 
 - [ ] Aspect-ratio post-processing for captured primary images.
-- [ ] BIF/chapter-image generation through custom/distributed ffmpeg while retaining Emby's thumbnail storage format.
+- [ ] Optical ISO/BDMV chapter-image/BIF integration.
 - [ ] Distributed fingerprint processing through compatible ffmpeg/chromaprint workers.
 - [ ] Central-server MediaInfo synchronization workflow.
 - [ ] Additional music album/artist persistence behavior if runtime testing shows parent metadata is not restored by the current Audio lifecycle.
@@ -136,8 +156,9 @@ The following compatibility milestones are green:
 - Run `31291950394` / #74 — read-only per-item distributed path Probe API.
 - Run `31292091938` / #76 — cross-platform optical ffprobe path quoting hardening.
 - Run `31292295446` / #79 — custom/optical/distributed single-frame image capture and guarded primary-image save.
+- Run `31294376554` / #83 — distributed chapter JPEG pre-generation with native ThumbnailGenerator/BIF finalization.
 
-Latest run #79 passed all matrix targets:
+Latest run #83 passed all matrix targets:
 
 - [x] Emby Core 4.8.0.80 compile/package/artifact.
 - [x] Emby Core 4.9.1.90 compile/package/artifact.
@@ -160,4 +181,6 @@ Latest run #79 passed all matrix targets:
 - [ ] Distributed Probe against a path visible with the same spelling on a worker.
 - [ ] Distributed routing success and remote-failure/native-fallback test.
 - [ ] Distributed image capture only after output-file synchronization is confirmed.
+- [ ] Distributed chapter-image task with worker-visible media and `metadata/chapters` output path.
+- [ ] Confirm Emby native ThumbnailGenerator/BIF finalization after distributed chapter JPEG pre-generation.
 - [ ] STRM distributed routing only after target-path parity is confirmed.
