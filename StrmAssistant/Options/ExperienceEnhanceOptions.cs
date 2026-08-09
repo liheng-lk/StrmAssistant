@@ -86,6 +86,26 @@ namespace StrmAssistant.Options
         [Required]
         public bool HideCollectionsLibrary { get; set; } = false;
 
+        [DisplayName("人物显示过滤（实验）")]
+        [Description("在电影/剧集详情返回 DTO 时过滤 People 列表，不删除人物数据库记录。关闭时完全保持 Emby 原始行为。")]
+        [Required]
+        public bool EnablePeopleDisplayFilter { get; set; } = false;
+
+        [DisplayName("隐藏无头像人物")]
+        [Description("只在详情页返回结果中隐藏没有 Primary Image 的人物。")]
+        [VisibleCondition(nameof(EnablePeopleDisplayFilter), SimpleCondition.IsTrue)]
+        public bool HidePeopleWithoutImage { get; set; } = false;
+
+        [DisplayName("仅显示演员")]
+        [Description("只保留 Actor / GuestStar；导演、编剧等其他人物仍保存在数据库中，只是不显示。")]
+        [VisibleCondition(nameof(EnablePeopleDisplayFilter), SimpleCondition.IsTrue)]
+        public bool ShowActorsOnly { get; set; } = false;
+
+        [DisplayName("隐藏非中文人物名")]
+        [Description("仅保留名称中包含中日韩统一表意文字的人物。适合中文人物库整理；不会改写或删除人物元数据。")]
+        [VisibleCondition(nameof(EnablePeopleDisplayFilter), SimpleCondition.IsTrue)]
+        public bool HideNonChinesePeopleNames { get; set; } = false;
+
         [DisplayNameL("GeneralOptions_MergeMultiVersion_Merge_Multiple_Versions", typeof(Resources))]
         [DescriptionL("GeneralOptions_MergeMultiVersion_Auto_merge_multiple_versions_if_in_the_same_folder_", typeof(Resources))]
         [Required]
