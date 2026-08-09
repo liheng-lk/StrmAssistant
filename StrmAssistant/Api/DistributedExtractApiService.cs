@@ -16,6 +16,7 @@ namespace StrmAssistant.Api
     public sealed class GetDistributedExtractHealth : IReturn<DistributedExtractHealthResult>
     {
         public bool RunVulkanTest { get; set; }
+        public bool RunChromaprintTest { get; set; }
     }
 
     [Route("/StrmAssistant/DistributedExtract/Probe/{Id}", "GET",
@@ -47,7 +48,9 @@ namespace StrmAssistant.Api
         public async Task<object> Get(GetDistributedExtractHealth request)
         {
             var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
-            return await _diagnostics.CheckAsync(options, request?.RunVulkanTest == true,
+            return await _diagnostics.CheckAsync(options,
+                    request?.RunVulkanTest == true,
+                    request?.RunChromaprintTest == true,
                     CancellationToken.None)
                 .ConfigureAwait(false);
         }
