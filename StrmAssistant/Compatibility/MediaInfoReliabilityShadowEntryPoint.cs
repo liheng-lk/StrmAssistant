@@ -1,5 +1,4 @@
 using HarmonyLib;
-using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Plugins;
@@ -7,7 +6,6 @@ using StrmAssistant.MediaEnhance;
 using System;
 using System.Linq;
 using System.Reflection;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace StrmAssistant.Compatibility
@@ -15,9 +13,7 @@ namespace StrmAssistant.Compatibility
     public sealed class MediaInfoReliabilityShadowRuntimeStatus
     {
         public int SaveMediaStreamsTargetsPatched { get; set; }
-        public int MediaSourceReadTargetsPatched { get; set; }
         public long DeferredCapturesScheduled { get; set; }
-        public long PreReadShadowRestores { get; set; }
         public string LastError { get; set; }
         public string Error { get; set; }
     }
@@ -28,6 +24,11 @@ namespace StrmAssistant.Compatibility
             new MediaInfoReliabilityShadowRuntimeStatus();
     }
 
+    /// <summary>
+    /// Captures a STRM reliability shadow after MediaStreams are persisted. Playback pre-read restore
+    /// is intentionally owned only by MediaInfoPreReadAndExternalTrackGuardEntryPoint so a playback
+    /// request crosses one recovery prefix rather than two competing Harmony prefixes.
+    /// </summary>
     public sealed class MediaInfoReliabilityShadowEntryPoint : IServerEntryPoint
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.mediainfo-shadow";
@@ -39,64 +40,44 @@ namespace StrmAssistant.Compatibility
             MediaInfoReliabilityShadowRuntimeState.Status = status;
             try
             {
-                _harmony = new Harmony(HarmonyId);
                 var repository = Plugin.Instance?.ApplicationHost?.Resolve<IItemRepository>();
-                if (repository != null)
+                if (repository == null)
                 {
-                    var saveTargets = repository.GetType()
-                        .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                        .Where(method => string.Equals(method.Name, "SaveMediaStreams", StringComparison.Ordinal) &&
-                                         method.GetParameters().Length >= 2)
-                        .Distinct()
-                        .ToArray();
-                    var postfix = new HarmonyMethod(typeof(MediaInfoReliabilityShadowPatches).GetMethod(
-                        nameof(MediaInfoReliabilityShadowPatches.SaveMediaStreamsPostfix),
-                        BindingFlags.Public | BindingFlags.Static));
-                    foreach (var target in saveTargets)
+                    status.Error = "IItemRepository is unavailable.";
+                    return;
+                }
+
+                var saveTargets = repository.GetType()
+                    .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .Where(method => string.Equals(method.Name, "SaveMediaStreams", StringComparison.Ordinal) &&
+                                     method.GetParameters().Length >= 2)
+                    .Distinct()
+                    .ToArray();
+                if (saveTargets.Length == 0)
+                {
+                    status.Error = "No runtime SaveMediaStreams target was found for the STRM reliability shadow.";
+                    return;
+                }
+
+                _harmony = new Harmony(HarmonyId);
+                var postfix = new HarmonyMethod(typeof(MediaInfoReliabilityShadowPatches).GetMethod(
+                    nameof(MediaInfoReliabilityShadowPatches.SaveMediaStreamsPostfix),
+                    BindingFlags.Public | BindingFlags.Static));
+                foreach (var target in saveTargets)
+                {
+                    try
                     {
-                        try
-                        {
-                            _harmony.Patch(target, postfix: postfix);
-                            status.SaveMediaStreamsTargetsPatched++;
-                        }
-                        catch (Exception ex)
-                        {
-                            status.LastError = ex.Message;
-                        }
+                        _harmony.Patch(target, postfix: postfix);
+                        status.SaveMediaStreamsTargetsPatched++;
+                    }
+                    catch (Exception ex)
+                    {
+                        status.LastError = ex.Message;
                     }
                 }
 
-                var mediaSourceManager = Plugin.Instance?.ApplicationHost?.Resolve<IMediaSourceManager>();
-                if (mediaSourceManager != null)
-                {
-                    var readTargets = mediaSourceManager.GetType()
-                        .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                        .Where(method =>
-                            (string.Equals(method.Name, "GetPlaybackMediaSources", StringComparison.Ordinal) ||
-                             string.Equals(method.Name, "GetPlayackMediaSources", StringComparison.Ordinal) ||
-                             string.Equals(method.Name, "GetStaticMediaSources", StringComparison.Ordinal)) &&
-                            method.GetParameters().Any(parameter => typeof(BaseItem).IsAssignableFrom(parameter.ParameterType)))
-                        .Distinct()
-                        .ToArray();
-                    var prefix = new HarmonyMethod(typeof(MediaInfoReliabilityShadowPatches).GetMethod(
-                        nameof(MediaInfoReliabilityShadowPatches.MediaSourceReadPrefix),
-                        BindingFlags.Public | BindingFlags.Static)) { priority = Priority.Low };
-                    foreach (var target in readTargets)
-                    {
-                        try
-                        {
-                            _harmony.Patch(target, prefix: prefix);
-                            status.MediaSourceReadTargetsPatched++;
-                        }
-                        catch (Exception ex)
-                        {
-                            status.LastError = ex.Message;
-                        }
-                    }
-                }
-
-                if (status.SaveMediaStreamsTargetsPatched == 0 && status.MediaSourceReadTargetsPatched == 0)
-                    status.Error = "No repository/media-source target could be patched for the STRM reliability shadow.";
+                if (status.SaveMediaStreamsTargetsPatched == 0)
+                    status.Error = "SaveMediaStreams targets were discovered but none could be patched.";
             }
             catch (Exception ex)
             {
@@ -113,11 +94,9 @@ namespace StrmAssistant.Compatibility
 
     public static class MediaInfoReliabilityShadowPatches
     {
-        private static readonly AsyncLocal<int> HydrationDepth = new AsyncLocal<int>();
-
         public static void SaveMediaStreamsPostfix(object[] __args)
         {
-            if (HydrationDepth.Value > 0 || __args == null) return;
+            if (__args == null) return;
             var itemId = FindItemId(__args);
             if (itemId <= 0) return;
 
@@ -132,6 +111,8 @@ namespace StrmAssistant.Compatibility
                 {
                     try
                     {
+                        // SaveMediaStreams often precedes the Item runtime/container update. A short
+                        // delay lets the same extraction transaction finish before the snapshot check.
                         await Task.Delay(750).ConfigureAwait(false);
                         var fresh = libraryManager.GetItemById(itemId);
                         MediaInfoReliabilityShadowStore.Capture(fresh);
@@ -145,41 +126,6 @@ namespace StrmAssistant.Compatibility
             catch (Exception ex)
             {
                 MediaInfoReliabilityShadowRuntimeState.Status.LastError = ex.GetBaseException().Message;
-            }
-        }
-
-        [HarmonyPriority(Priority.Low)]
-        public static void MediaSourceReadPrefix(object[] __args)
-        {
-            if (HydrationDepth.Value > 0 || __args == null) return;
-            var itemIndex = -1;
-            BaseItem item = null;
-            for (var i = 0; i < __args.Length; i++)
-            {
-                if (!(__args[i] is BaseItem candidate)) continue;
-                item = candidate;
-                itemIndex = i;
-                break;
-            }
-            if (!MediaInfoReliabilityShadowStore.AppliesTo(item) ||
-                MediaInfoIntegrityService.IsCoreMediaInfoComplete(item)) return;
-            if (!MediaInfoReliabilityShadowStore.Exists(item)) return;
-
-            try
-            {
-                HydrationDepth.Value++;
-                if (!MediaInfoReliabilityShadowStore.Restore(item, "PreRead STRM Shadow")) return;
-                MediaInfoReliabilityShadowRuntimeState.Status.PreReadShadowRestores++;
-                var fresh = Plugin.Instance?.ApplicationHost?.Resolve<ILibraryManager>()?.GetItemById(item.InternalId);
-                if (fresh != null && itemIndex >= 0) __args[itemIndex] = fresh;
-            }
-            catch (Exception ex)
-            {
-                MediaInfoReliabilityShadowRuntimeState.Status.LastError = ex.GetBaseException().Message;
-            }
-            finally
-            {
-                HydrationDepth.Value = Math.Max(0, HydrationDepth.Value - 1);
             }
         }
 
