@@ -26,6 +26,7 @@ namespace StrmAssistant.Experience
         public string AllowedRemoteRoots { get; set; } = string.Empty;
         public int TimeoutSeconds { get; set; } = 30;
         public bool TreatNotFoundAsSuccess { get; set; } = true;
+        public bool DeleteAssociatedSidecars { get; set; } = false;
     }
 
     public sealed class RemoteDeepDeletePathMapping
@@ -67,6 +68,8 @@ namespace StrmAssistant.Experience
                     result.AllowedRemoteRoots = ui.RemoteDeepDeleteAllowedRoots;
                     result.TimeoutSeconds = ui.RemoteDeepDeleteTimeoutSeconds;
                     result.TreatNotFoundAsSuccess = ui.RemoteDeepDeleteTreatNotFoundAsSuccess;
+                    // DeleteAssociatedSidecars intentionally remains in the dedicated runtime settings
+                    // until the destructive opt-in is explicitly saved through the remote settings API.
                 }
                 return Sanitize(result);
             }
@@ -93,7 +96,8 @@ namespace StrmAssistant.Experience
                     "PathMappings=" + Escape(_options.PathMappings),
                     "AllowedRemoteRoots=" + Escape(_options.AllowedRemoteRoots),
                     "TimeoutSeconds=" + _options.TimeoutSeconds,
-                    "TreatNotFoundAsSuccess=" + _options.TreatNotFoundAsSuccess
+                    "TreatNotFoundAsSuccess=" + _options.TreatNotFoundAsSuccess,
+                    "DeleteAssociatedSidecars=" + _options.DeleteAssociatedSidecars
                 });
                 return GetSnapshot();
             }
@@ -213,6 +217,7 @@ namespace StrmAssistant.Experience
                         case "AllowedRemoteRoots": result.AllowedRemoteRoots = value; break;
                         case "TimeoutSeconds": if (int.TryParse(value, out var timeout)) result.TimeoutSeconds = timeout; break;
                         case "TreatNotFoundAsSuccess": result.TreatNotFoundAsSuccess = ParseBool(value, true); break;
+                        case "DeleteAssociatedSidecars": result.DeleteAssociatedSidecars = ParseBool(value, false); break;
                     }
                 }
             }
@@ -241,7 +246,8 @@ namespace StrmAssistant.Experience
                 PathMappings = value.PathMappings ?? string.Empty,
                 AllowedRemoteRoots = value.AllowedRemoteRoots ?? string.Empty,
                 TimeoutSeconds = Math.Max(5, Math.Min(120, value.TimeoutSeconds <= 0 ? 30 : value.TimeoutSeconds)),
-                TreatNotFoundAsSuccess = value.TreatNotFoundAsSuccess
+                TreatNotFoundAsSuccess = value.TreatNotFoundAsSuccess,
+                DeleteAssociatedSidecars = value.DeleteAssociatedSidecars
             };
         }
 
