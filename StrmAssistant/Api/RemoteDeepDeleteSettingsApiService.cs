@@ -5,6 +5,8 @@ using MediaBrowser.Model.Services;
 using StrmAssistant.Experience;
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace StrmAssistant.Api
 {
@@ -27,9 +29,7 @@ namespace StrmAssistant.Api
     [Route("/StrmAssistant/DeepDelete/Remote/Settings", "GET",
         Summary = "Read redacted remote deep-delete provider settings")]
     [Authenticated(Roles = "Admin")]
-    public sealed class GetRemoteDeepDeleteSettings : IReturn<RemoteDeepDeleteSettingsView>
-    {
-    }
+    public sealed class GetRemoteDeepDeleteSettings : IReturn<RemoteDeepDeleteSettingsView> { }
 
     [Route("/StrmAssistant/DeepDelete/Remote/Settings", "POST",
         Summary = "Save remote deep-delete provider settings")]
@@ -55,6 +55,14 @@ namespace StrmAssistant.Api
         Summary = "Preview remote provider path mapping without deleting anything")]
     [Authenticated(Roles = "Admin")]
     public sealed class GetRemoteDeepDeletePlan : IReturn<RemoteDeepDeletePlan>
+    {
+        public string Id { get; set; }
+    }
+
+    [Route("/StrmAssistant/DeepDelete/{Id}/RemoteProbe", "GET",
+        Summary = "Verify whether the mapped remote object currently exists without deleting it")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class GetRemoteDeepDeleteProbe : IReturn<RemoteDeepDeleteProbeResult>
     {
         public string Id { get; set; }
     }
@@ -89,30 +97,53 @@ namespace StrmAssistant.Api
                 Enabled = request.Enabled,
                 Provider = provider,
                 BaseUrl = request.BaseUrl,
-                AccessToken = request.ClearAccessToken
-                    ? string.Empty
-                    : request.AccessToken ?? current.AccessToken,
+                AccessToken = request.ClearAccessToken ? string.Empty : request.AccessToken ?? current.AccessToken,
                 Username = request.Username ?? current.Username,
-                Password = request.ClearPassword
-                    ? string.Empty
-                    : request.Password ?? current.Password,
+                Password = request.ClearPassword ? string.Empty : request.Password ?? current.Password,
                 PathMappings = request.PathMappings,
                 AllowedRemoteRoots = request.AllowedRemoteRoots,
                 TimeoutSeconds = request.TimeoutSeconds,
                 TreatNotFoundAsSuccess = request.TreatNotFoundAsSuccess
             };
-
             return ToView(RemoteDeepDeleteRuntimeSettings.Save(next));
         }
 
         public object Get(GetRemoteDeepDeletePlan request)
         {
-            if (request == null || !long.TryParse(request.Id, out var id))
-                return new RemoteDeepDeletePlan { Error = "Invalid item id." };
-            var item = _libraryManager.GetItemById(id);
+            var item = ResolveItem(request?.Id);
             return item == null
-                ? new RemoteDeepDeletePlan { Error = "Item was not found." }
+                ? new RemoteDeepDeletePlan { Error = "Item was not found or id is invalid." }
                 : _remoteService.BuildPlan(item);
+        }
+
+        public async Task<object> Get(GetRemoteDeepDeleteProbe request)
+        {
+            var item = ResolveItem(request?.Id);
+            if (item == null)
+                return new RemoteDeepDeleteProbeResult { Error = "Item was not found or id is invalid." };
+
+            var plan = _remoteService.BuildPlan(item);
+            if (!plan.Applicable)
+                return new RemoteDeepDeleteProbeResult
+                {
+                    Provider = plan.Provider,
+                    RemotePath = plan.RemotePath,
+                    Error = plan.Error ?? "Remote deletion is not applicable to this item."
+                };
+            if (!plan.Allowed)
+                return new RemoteDeepDeleteProbeResult
+                {
+                    Provider = plan.Provider,
+                    RemotePath = plan.RemotePath,
+                    Error = plan.Error ?? "Remote plan is blocked by configuration."
+                };
+
+            return await _remoteService.ProbeAsync(plan, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        private MediaBrowser.Controller.Entities.BaseItem ResolveItem(string id)
+        {
+            return long.TryParse(id, out var internalId) ? _libraryManager.GetItemById(internalId) : null;
         }
 
         private static RemoteDeepDeleteSettingsView ToView(RemoteDeepDeleteOptions options)
@@ -135,7 +166,7 @@ namespace StrmAssistant.Api
             if (options.Enabled && options.Provider == RemoteDeepDeleteProviderType.OpenList && !view.HasAccessToken)
                 view.Warnings.Add("OpenList is enabled but no AccessToken is stored.");
             if (options.Enabled && RemoteDeepDeleteRuntimeSettings.ParseMappings(options.PathMappings).Count == 0)
-                view.Warnings.Add("No valid path mappings are configured; remote deletion cannot resolve STRM targets.");
+                view.Warnings.Add("No valid path mappings are configured; remote STRM deletion will be blocked instead of silently deleting only the local STRM.");
             if (options.Enabled && RemoteDeepDeleteRuntimeSettings.ParseAllowedRoots(options.AllowedRemoteRoots).Count == 0)
                 view.Warnings.Add("No allowed remote roots are configured; destructive remote calls remain blocked.");
             return view;
