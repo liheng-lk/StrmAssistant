@@ -16,15 +16,16 @@ namespace StrmAssistant.MediaEnhance
 {
     public sealed class MediaInfoReliabilityShadowRecord
     {
-        public int SchemaVersion { get; set; } = 1;
+        public int SchemaVersion { get; set; } = 2;
         public string SourcePath { get; set; }
+        public string ShortcutTargetFingerprint { get; set; }
         public string CapturedUtc { get; set; }
         public long? RunTimeTicks { get; set; }
         public long Size { get; set; }
         public string Container { get; set; }
         public long TotalBitrate { get; set; }
-        public long Width { get; set; }
-        public long Height { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
         public List<MediaStream> MediaStreams { get; set; } = new List<MediaStream>();
     }
 
@@ -36,10 +37,16 @@ namespace StrmAssistant.MediaEnhance
         public long CapturesFailed { get; set; }
         public long RestoresSucceeded { get; set; }
         public long RestoresFailed { get; set; }
+        public long StaleTargetRejected { get; set; }
         public string LastItemPath { get; set; }
         public string LastError { get; set; }
     }
 
+    /// <summary>
+    /// Small plugin-owned shadow store for STRM core playback metadata. This is independent from the
+    /// user's optional MediaInfo JSON persistence mode and stores no raw STRM target URL: only a
+    /// SHA-256 fingerprint is persisted so URL query tokens are never copied into the shadow cache.
+    /// </summary>
     public static class MediaInfoReliabilityShadowStore
     {
         private static readonly object Sync = new object();
@@ -55,8 +62,7 @@ namespace StrmAssistant.MediaEnhance
         public static string GetPath(BaseItem item)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.Path)) return null;
-            var root = GetRoot();
-            return Path.Combine(root, ComputeKey(item.Path) + ".json");
+            return Path.Combine(GetRoot(), ComputeHash(NormalizeSource(item.Path)) + ".json");
         }
 
         public static bool Exists(BaseItem item)
@@ -64,7 +70,8 @@ namespace StrmAssistant.MediaEnhance
             try
             {
                 var path = GetPath(item);
-                return !string.IsNullOrWhiteSpace(path) && (File.Exists(path) || File.Exists(path + ".bak"));
+                return !string.IsNullOrWhiteSpace(path) &&
+                       (TryLoad(item, path, out _) || TryLoad(item, path + ".bak", out _));
             }
             catch { return false; }
         }
@@ -80,6 +87,13 @@ namespace StrmAssistant.MediaEnhance
 
                 var fresh = libraryManager.GetItemById(item.InternalId) ?? item;
                 if (!MediaInfoIntegrityService.IsCoreMediaInfoComplete(fresh))
+                {
+                    Increment(status => status.CapturesSkipped++);
+                    return false;
+                }
+
+                var targetFingerprint = ComputeShortcutTargetFingerprint(fresh);
+                if (string.IsNullOrWhiteSpace(targetFingerprint))
                 {
                     Increment(status => status.CapturesSkipped++);
                     return false;
@@ -101,6 +115,7 @@ namespace StrmAssistant.MediaEnhance
                 var record = new MediaInfoReliabilityShadowRecord
                 {
                     SourcePath = fresh.Path,
+                    ShortcutTargetFingerprint = targetFingerprint,
                     CapturedUtc = DateTimeOffset.UtcNow.ToString("O"),
                     RunTimeTicks = fresh.RunTimeTicks,
                     Size = fresh.Size,
@@ -114,7 +129,8 @@ namespace StrmAssistant.MediaEnhance
                 var path = GetPath(fresh);
                 var temp = path + ".tmp";
                 var backup = path + ".bak";
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                var parent = Path.GetDirectoryName(path);
+                if (!string.IsNullOrWhiteSpace(parent)) Directory.CreateDirectory(parent);
 
                 if (File.Exists(path) && TryLoad(fresh, path, out _)) File.Copy(path, backup, true);
                 serializer.SerializeToFile(record, temp);
@@ -213,6 +229,7 @@ namespace StrmAssistant.MediaEnhance
                 TryDelete(path);
                 TryDelete(path + ".bak");
                 TryDelete(path + ".tmp");
+                lock (Sync) LastCapture.Remove(item?.InternalId ?? 0);
             }
             catch { }
         }
@@ -229,7 +246,7 @@ namespace StrmAssistant.MediaEnhance
                 if (serializer == null) return false;
                 record = serializer.DeserializeFromFileAsync<MediaInfoReliabilityShadowRecord>(path)
                     .GetAwaiter().GetResult();
-                if (record == null || record.SchemaVersion != 1 ||
+                if (record == null || record.SchemaVersion != 2 ||
                     record.RunTimeTicks.GetValueOrDefault() <= 0 || record.MediaStreams == null ||
                     !HasExpectedCoreStream(item, record.MediaStreams))
                 {
@@ -239,6 +256,15 @@ namespace StrmAssistant.MediaEnhance
                 if (!string.Equals(NormalizeSource(record.SourcePath), NormalizeSource(item.Path),
                         StringComparison.Ordinal))
                 {
+                    record = null;
+                    return false;
+                }
+
+                var currentTargetFingerprint = ComputeShortcutTargetFingerprint(item);
+                if (string.IsNullOrWhiteSpace(currentTargetFingerprint) ||
+                    !FixedTimeEquals(record.ShortcutTargetFingerprint, currentTargetFingerprint))
+                {
+                    Increment(status => status.StaleTargetRejected++);
                     record = null;
                     return false;
                 }
@@ -270,13 +296,34 @@ namespace StrmAssistant.MediaEnhance
             return path;
         }
 
-        private static string ComputeKey(string sourcePath)
+        private static string ComputeShortcutTargetFingerprint(BaseItem item)
+        {
+            if (!AppliesTo(item) || string.IsNullOrWhiteSpace(item.Path) || !File.Exists(item.Path)) return null;
+            try
+            {
+                var target = File.ReadLines(item.Path)
+                    .Select(line => line?.Trim())
+                    .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
+                return string.IsNullOrWhiteSpace(target) ? null : ComputeHash(target);
+            }
+            catch { return null; }
+        }
+
+        private static string ComputeHash(string value)
         {
             using var sha = SHA256.Create();
-            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(NormalizeSource(sourcePath)));
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value ?? string.Empty));
             var builder = new StringBuilder(bytes.Length * 2);
-            foreach (var value in bytes) builder.Append(value.ToString("x2"));
+            foreach (var current in bytes) builder.Append(current.ToString("x2"));
             return builder.ToString();
+        }
+
+        private static bool FixedTimeEquals(string left, string right)
+        {
+            if (string.IsNullOrEmpty(left) || string.IsNullOrEmpty(right) || left.Length != right.Length) return false;
+            var diff = 0;
+            for (var i = 0; i < left.Length; i++) diff |= left[i] ^ right[i];
+            return diff == 0;
         }
 
         private static string NormalizeSource(string value)
