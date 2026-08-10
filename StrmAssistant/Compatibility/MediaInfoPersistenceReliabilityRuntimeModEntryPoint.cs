@@ -1,10 +1,10 @@
 using HarmonyLib;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Plugins;
-using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using StrmAssistant.Api;
 using StrmAssistant.Common;
+using StrmAssistant.MediaEnhance;
 using System;
 using System.IO;
 using System.Linq;
@@ -26,6 +26,7 @@ namespace StrmAssistant.Compatibility
         public long BackupSnapshotsCreated { get; set; }
         public long BackupRestoresSucceeded { get; set; }
         public long BackupRestoresFailed { get; set; }
+        public long InvalidSnapshotsRejected { get; set; }
         public string Error { get; set; }
     }
 
@@ -36,12 +37,9 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// Reliability layer for persisted MediaInfo.
-    /// 1. STRM/non-file-protocol items are not considered missing only because Size == 0.
-    /// 2. Generic scan ItemRemoved events never destroy the recovery snapshot.
-    /// 3. The previous valid JSON is retained as .bak before overwrite.
-    /// 4. A failed/missing primary JSON can be retried from .bak once.
-    /// No Emby database schema is modified by this entry point.
+    /// Reliability layer for persisted MediaInfo. Backups are promoted only after the actual JSON
+    /// payload has been deserialized and validated; an empty/corrupt primary can therefore never
+    /// overwrite the last known-good .bak snapshot.
     /// </summary>
     public sealed class MediaInfoPersistenceReliabilityRuntimeModEntryPoint : IServerEntryPoint
     {
@@ -109,9 +107,10 @@ namespace StrmAssistant.Compatibility
                     status.DeserializeBackupPatched = true;
                 }
 
-                var explicitDeepDelete = typeof(DeepDeleteApiService).GetMethod("Delete",
-                    BindingFlags.Instance | BindingFlags.Public,
-                    null, new[] { typeof(ExecuteDeepDelete) }, null);
+                var explicitDeepDelete = typeof(DeepDeleteApiService).GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                    .FirstOrDefault(method => method.Name == "Delete" &&
+                                              method.GetParameters().Length == 1 &&
+                                              method.GetParameters()[0].ParameterType == typeof(ExecuteDeepDelete));
                 if (explicitDeepDelete != null)
                 {
                     _harmony.Patch(explicitDeepDelete,
@@ -147,18 +146,10 @@ namespace StrmAssistant.Compatibility
         public static void HasMediaInfoPostfix(BaseItem item, ref bool __result)
         {
             if (__result || item == null) return;
-
             try
             {
-                if (!item.RunTimeTicks.HasValue) return;
-                var streams = item.GetMediaStreams();
-                if (streams == null || !streams.Any(stream =>
-                        stream.Type == MediaStreamType.Video || stream.Type == MediaStreamType.Audio))
-                    return;
-
-                // STRM and true remote-protocol media frequently have no meaningful local byte size.
-                // Streams + runtime are authoritative enough to avoid a needless ffprobe on playback.
-                if (item.IsShortcut || !item.IsFileProtocol)
+                if ((item.IsShortcut || !item.IsFileProtocol) &&
+                    MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
                 {
                     __result = true;
                     IncrementCounter(Counter.RemoteSizeZeroAccepted);
@@ -166,7 +157,6 @@ namespace StrmAssistant.Compatibility
             }
             catch
             {
-                // Leave the original conservative result unchanged.
             }
         }
 
@@ -175,14 +165,14 @@ namespace StrmAssistant.Compatibility
             if (ExplicitDeleteDepth.Value > 0) return true;
             if (string.IsNullOrWhiteSpace(source)) return true;
 
-            if (source.IndexOf("Item Removed Event", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (source.IndexOf("Item Removed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                source.IndexOf("ItemRemoved", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 IncrementCounter(Counter.RemovalSnapshotsPreserved);
                 if (Plugin.Instance?.DebugMode == true)
-                    Plugin.Instance.Logger.Debug("MediaInfo reliability - preserve snapshot on library removal event: " + source);
+                    Plugin.Instance.Logger.Debug("MediaInfo reliability - preserve snapshot on non-explicit item removal: " + source);
                 return false;
             }
-
             return true;
         }
 
@@ -206,7 +196,7 @@ namespace StrmAssistant.Compatibility
         public static void SerializeMediaInfoPostfix(BaseItem item, ref Task<bool> __result)
         {
             if (__result == null || item == null) return;
-            __result = SeedBackupAfterSuccessfulWriteAsync(item, __result);
+            __result = ValidateAndSeedBackupAsync(item, __result);
         }
 
         public static void DeserializeMediaInfoPostfix(MediaInfoApi __instance, BaseItem item,
@@ -216,27 +206,18 @@ namespace StrmAssistant.Compatibility
             __result = RetryFromBackupAsync(__instance, item, directoryService, source, ignoreFileChange, __result);
         }
 
-        private static async Task<bool> SeedBackupAfterSuccessfulWriteAsync(BaseItem item, Task<bool> original)
+        private static async Task<bool> ValidateAndSeedBackupAsync(BaseItem item, Task<bool> original)
         {
             var success = await original.ConfigureAwait(false);
             if (!success) return false;
 
-            try
+            if (MediaInfoIntegrityService.RefreshValidatedBackup(item))
+                IncrementCounter(Counter.BackupSnapshotsCreated);
+            else
             {
-                var primary = MediaInfoApi.GetMediaInfoJsonPath(item);
-                var backup = BackupPath(primary);
-                if (File.Exists(primary) && !File.Exists(backup))
-                {
-                    File.Copy(primary, backup, true);
-                    IncrementCounter(Counter.BackupSnapshotsCreated);
-                }
+                IncrementCounter(Counter.InvalidSnapshotsRejected);
+                Plugin.Instance?.Logger?.Warn("MediaInfo persistence produced an invalid snapshot; previous backup was preserved: {0}", item.Path);
             }
-            catch (Exception ex)
-            {
-                if (Plugin.Instance?.DebugMode == true)
-                    Plugin.Instance.Logger.Debug("MediaInfo reliability - seed backup failed: " + ex.Message);
-            }
-
             return true;
         }
 
@@ -248,7 +229,11 @@ namespace StrmAssistant.Compatibility
 
             var primary = MediaInfoApi.GetMediaInfoJsonPath(item);
             var backup = BackupPath(primary);
-            if (!File.Exists(backup)) return false;
+            if (!MediaInfoIntegrityService.IsSnapshotValid(item, backup))
+            {
+                if (File.Exists(backup)) IncrementCounter(Counter.InvalidSnapshotsRejected);
+                return false;
+            }
 
             try
             {
@@ -280,8 +265,11 @@ namespace StrmAssistant.Compatibility
             {
                 var primary = MediaInfoApi.GetMediaInfoJsonPath(item);
                 if (!File.Exists(primary)) return;
-                var info = new FileInfo(primary);
-                if (info.Length <= 2) return;
+                if (!MediaInfoIntegrityService.IsSnapshotValid(item, primary))
+                {
+                    IncrementCounter(Counter.InvalidSnapshotsRejected);
+                    return;
+                }
 
                 var backup = BackupPath(primary);
                 File.Copy(primary, backup, true);
@@ -305,7 +293,8 @@ namespace StrmAssistant.Compatibility
             RemovalSnapshotsPreserved,
             BackupSnapshotsCreated,
             BackupRestoresSucceeded,
-            BackupRestoresFailed
+            BackupRestoresFailed,
+            InvalidSnapshotsRejected
         }
 
         private static void IncrementCounter(Counter counter)
@@ -316,21 +305,12 @@ namespace StrmAssistant.Compatibility
                 if (status == null) return;
                 switch (counter)
                 {
-                    case Counter.RemoteSizeZeroAccepted:
-                        status.RemoteSizeZeroAccepted++;
-                        break;
-                    case Counter.RemovalSnapshotsPreserved:
-                        status.RemovalSnapshotsPreserved++;
-                        break;
-                    case Counter.BackupSnapshotsCreated:
-                        status.BackupSnapshotsCreated++;
-                        break;
-                    case Counter.BackupRestoresSucceeded:
-                        status.BackupRestoresSucceeded++;
-                        break;
-                    case Counter.BackupRestoresFailed:
-                        status.BackupRestoresFailed++;
-                        break;
+                    case Counter.RemoteSizeZeroAccepted: status.RemoteSizeZeroAccepted++; break;
+                    case Counter.RemovalSnapshotsPreserved: status.RemovalSnapshotsPreserved++; break;
+                    case Counter.BackupSnapshotsCreated: status.BackupSnapshotsCreated++; break;
+                    case Counter.BackupRestoresSucceeded: status.BackupRestoresSucceeded++; break;
+                    case Counter.BackupRestoresFailed: status.BackupRestoresFailed++; break;
+                    case Counter.InvalidSnapshotsRejected: status.InvalidSnapshotsRejected++; break;
                 }
             }
         }
