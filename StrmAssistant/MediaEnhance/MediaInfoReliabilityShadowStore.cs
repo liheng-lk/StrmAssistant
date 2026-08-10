@@ -23,8 +23,8 @@ namespace StrmAssistant.MediaEnhance
         public long Size { get; set; }
         public string Container { get; set; }
         public long TotalBitrate { get; set; }
-        public int Width { get; set; }
-        public int Height { get; set; }
+        public long Width { get; set; }
+        public long Height { get; set; }
         public List<MediaStream> MediaStreams { get; set; } = new List<MediaStream>();
     }
 
@@ -40,11 +40,6 @@ namespace StrmAssistant.MediaEnhance
         public string LastError { get; set; }
     }
 
-    /// <summary>
-    /// Plugin-local last-known-good core MediaInfo for STRM/shortcut items. This cache is deliberately
-    /// independent from the user-facing MediaInfo persistence mode: it exists only to prevent a known-good
-    /// STRM item from falling back to a slow remote probe after Emby's repository streams are lost.
-    /// </summary>
     public static class MediaInfoReliabilityShadowStore
     {
         private static readonly object Sync = new object();
