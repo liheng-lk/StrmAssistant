@@ -4,6 +4,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
+using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Serialization;
 using StrmAssistant.Common;
 using StrmAssistant.Compatibility;
@@ -45,12 +46,6 @@ namespace StrmAssistant.MediaEnhance
         public string RecommendedAction { get; set; }
     }
 
-    /// <summary>
-    /// Deterministic integrity checker for persisted MediaInfo. The important distinction is
-    /// "core complete" rather than Size != 0: STRM and remote media legitimately have no local
-    /// byte size, while runtime + the expected media stream are sufficient for playback planning.
-    /// Snapshot validation deserializes the real persisted payload before it is trusted as backup.
-    /// </summary>
     public static class MediaInfoIntegrityService
     {
         private static readonly object HydrationSync = new object();
@@ -145,10 +140,7 @@ namespace StrmAssistant.MediaEnhance
                 var primary = MediaInfoApi.GetMediaInfoJsonPath(item);
                 return File.Exists(primary) || File.Exists(MediaInfoPersistenceReliabilityPatches.BackupPath(primary));
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         public static bool IsSnapshotValid(BaseItem item, string path)
@@ -170,10 +162,7 @@ namespace StrmAssistant.MediaEnhance
                 File.Copy(backup, primary, true);
                 return TryLoadValidSnapshot(item, primary, out _, out _);
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         public static bool RefreshValidatedBackup(BaseItem item)
@@ -189,17 +178,9 @@ namespace StrmAssistant.MediaEnhance
                 File.Copy(primary, backup, true);
                 return true;
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
-        /// <summary>
-        /// Restores only the fields required by playback planning. It deliberately does not run
-        /// ffprobe, restore images, generate thumbnails, or touch remote content. This makes it safe
-        /// to call immediately before Emby builds PlaybackInfo for an incomplete STRM item.
-        /// </summary>
         public static bool HydrateCore(BaseItem item, string source)
         {
             if (item == null || Plugin.Instance == null) return false;
