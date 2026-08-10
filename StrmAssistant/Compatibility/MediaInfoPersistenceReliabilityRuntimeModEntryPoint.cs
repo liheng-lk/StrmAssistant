@@ -37,12 +37,10 @@ namespace StrmAssistant.Compatibility
 
     /// <summary>
     /// Reliability layer for persisted MediaInfo.
-    ///
-    /// 1. STRM/non-file-protocol items are not considered "missing MediaInfo" only because Size == 0.
+    /// 1. STRM/non-file-protocol items are not considered missing only because Size == 0.
     /// 2. Generic scan ItemRemoved events never destroy the recovery snapshot.
     /// 3. The previous valid JSON is retained as .bak before overwrite.
     /// 4. A failed/missing primary JSON can be retried from .bak once.
-    ///
     /// No Emby database schema is modified by this entry point.
     /// </summary>
     public sealed class MediaInfoPersistenceReliabilityRuntimeModEntryPoint : IServerEntryPoint
@@ -144,6 +142,7 @@ namespace StrmAssistant.Compatibility
     {
         private static readonly AsyncLocal<int> ExplicitDeleteDepth = new AsyncLocal<int>();
         private static readonly AsyncLocal<bool> BackupRetry = new AsyncLocal<bool>();
+        private static readonly object CounterSync = new object();
 
         public static void HasMediaInfoPostfix(BaseItem item, ref bool __result)
         {
@@ -162,7 +161,7 @@ namespace StrmAssistant.Compatibility
                 if (item.IsShortcut || !item.IsFileProtocol)
                 {
                     __result = true;
-                    Interlocked.Increment(ref MediaInfoPersistenceReliabilityState.Status.RemoteSizeZeroAccepted);
+                    IncrementCounter(Counter.RemoteSizeZeroAccepted);
                 }
             }
             catch
@@ -178,7 +177,7 @@ namespace StrmAssistant.Compatibility
 
             if (source.IndexOf("Item Removed Event", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                Interlocked.Increment(ref MediaInfoPersistenceReliabilityState.Status.RemovalSnapshotsPreserved);
+                IncrementCounter(Counter.RemovalSnapshotsPreserved);
                 if (Plugin.Instance?.DebugMode == true)
                     Plugin.Instance.Logger.Debug("MediaInfo reliability - preserve snapshot on library removal event: " + source);
                 return false;
@@ -229,7 +228,7 @@ namespace StrmAssistant.Compatibility
                 if (File.Exists(primary) && !File.Exists(backup))
                 {
                     File.Copy(primary, backup, true);
-                    Interlocked.Increment(ref MediaInfoPersistenceReliabilityState.Status.BackupSnapshotsCreated);
+                    IncrementCounter(Counter.BackupSnapshotsCreated);
                 }
             }
             catch (Exception ex)
@@ -260,15 +259,12 @@ namespace StrmAssistant.Compatibility
                 BackupRetry.Value = true;
                 var retried = await api.DeserializeMediaInfo(item, directoryService,
                     source + " BackupRetry", ignoreFileChange).ConfigureAwait(false);
-                if (retried)
-                    Interlocked.Increment(ref MediaInfoPersistenceReliabilityState.Status.BackupRestoresSucceeded);
-                else
-                    Interlocked.Increment(ref MediaInfoPersistenceReliabilityState.Status.BackupRestoresFailed);
+                IncrementCounter(retried ? Counter.BackupRestoresSucceeded : Counter.BackupRestoresFailed);
                 return retried;
             }
             catch (Exception ex)
             {
-                Interlocked.Increment(ref MediaInfoPersistenceReliabilityState.Status.BackupRestoresFailed);
+                IncrementCounter(Counter.BackupRestoresFailed);
                 Plugin.Instance?.Logger?.Warn("MediaInfo reliability - backup restore failed: " + ex.Message);
                 return false;
             }
@@ -289,7 +285,7 @@ namespace StrmAssistant.Compatibility
 
                 var backup = BackupPath(primary);
                 File.Copy(primary, backup, true);
-                Interlocked.Increment(ref MediaInfoPersistenceReliabilityState.Status.BackupSnapshotsCreated);
+                IncrementCounter(Counter.BackupSnapshotsCreated);
             }
             catch (Exception ex)
             {
@@ -301,6 +297,42 @@ namespace StrmAssistant.Compatibility
         public static string BackupPath(string primary)
         {
             return string.IsNullOrWhiteSpace(primary) ? null : primary + ".bak";
+        }
+
+        private enum Counter
+        {
+            RemoteSizeZeroAccepted,
+            RemovalSnapshotsPreserved,
+            BackupSnapshotsCreated,
+            BackupRestoresSucceeded,
+            BackupRestoresFailed
+        }
+
+        private static void IncrementCounter(Counter counter)
+        {
+            lock (CounterSync)
+            {
+                var status = MediaInfoPersistenceReliabilityState.Status;
+                if (status == null) return;
+                switch (counter)
+                {
+                    case Counter.RemoteSizeZeroAccepted:
+                        status.RemoteSizeZeroAccepted++;
+                        break;
+                    case Counter.RemovalSnapshotsPreserved:
+                        status.RemovalSnapshotsPreserved++;
+                        break;
+                    case Counter.BackupSnapshotsCreated:
+                        status.BackupSnapshotsCreated++;
+                        break;
+                    case Counter.BackupRestoresSucceeded:
+                        status.BackupRestoresSucceeded++;
+                        break;
+                    case Counter.BackupRestoresFailed:
+                        status.BackupRestoresFailed++;
+                        break;
+                }
+            }
         }
     }
 }
