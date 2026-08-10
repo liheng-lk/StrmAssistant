@@ -68,8 +68,7 @@ namespace StrmAssistant.Experience
                     result.AllowedRemoteRoots = ui.RemoteDeepDeleteAllowedRoots;
                     result.TimeoutSeconds = ui.RemoteDeepDeleteTimeoutSeconds;
                     result.TreatNotFoundAsSuccess = ui.RemoteDeepDeleteTreatNotFoundAsSuccess;
-                    // DeleteAssociatedSidecars intentionally remains in the dedicated runtime settings
-                    // until the destructive opt-in is explicitly saved through the remote settings API.
+                    result.DeleteAssociatedSidecars = ui.RemoteDeepDeleteAssociatedFiles;
                 }
                 return Sanitize(result);
             }
@@ -80,6 +79,7 @@ namespace StrmAssistant.Experience
             if (value == null) throw new ArgumentNullException(nameof(value));
             EnsureLoaded();
 
+            RemoteDeepDeleteOptions saved;
             lock (Sync)
             {
                 _options = Sanitize(value);
@@ -99,8 +99,11 @@ namespace StrmAssistant.Experience
                     "TreatNotFoundAsSuccess=" + _options.TreatNotFoundAsSuccess,
                     "DeleteAssociatedSidecars=" + _options.DeleteAssociatedSidecars
                 });
-                return GetSnapshot();
+                saved = Clone(_options);
             }
+
+            SyncPluginOptions(saved);
+            return GetSnapshot();
         }
 
         public static IReadOnlyList<RemoteDeepDeletePathMapping> ParseMappings(string raw)
@@ -173,7 +176,38 @@ namespace StrmAssistant.Experience
                    !string.IsNullOrWhiteSpace(ui.RemoteDeepDeleteUsername) ||
                    !string.IsNullOrEmpty(ui.RemoteDeepDeletePassword) ||
                    !string.IsNullOrWhiteSpace(ui.RemoteDeepDeletePathMappings) ||
-                   !string.IsNullOrWhiteSpace(ui.RemoteDeepDeleteAllowedRoots);
+                   !string.IsNullOrWhiteSpace(ui.RemoteDeepDeleteAllowedRoots) ||
+                   ui.RemoteDeepDeleteAssociatedFiles;
+        }
+
+        private static void SyncPluginOptions(RemoteDeepDeleteOptions value)
+        {
+            try
+            {
+                var plugin = Plugin.Instance;
+                var ui = plugin?.GetPluginOptions()?.ExperienceEnhanceOptions;
+                if (plugin == null || ui == null || value == null) return;
+
+                ui.EnableRemoteDeepDelete = value.Enabled;
+                if (!Enum.TryParse(value.Provider.ToString(), true,
+                        out ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption provider))
+                    provider = ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.None;
+                ui.RemoteDeepDeleteProvider = provider;
+                ui.RemoteDeepDeleteBaseUrl = value.BaseUrl;
+                ui.RemoteDeepDeleteAccessToken = value.AccessToken;
+                ui.RemoteDeepDeleteUsername = value.Username;
+                ui.RemoteDeepDeletePassword = value.Password;
+                ui.RemoteDeepDeletePathMappings = value.PathMappings;
+                ui.RemoteDeepDeleteAllowedRoots = value.AllowedRemoteRoots;
+                ui.RemoteDeepDeleteTimeoutSeconds = value.TimeoutSeconds;
+                ui.RemoteDeepDeleteTreatNotFoundAsSuccess = value.TreatNotFoundAsSuccess;
+                ui.RemoteDeepDeleteAssociatedFiles = value.DeleteAssociatedSidecars;
+                plugin.SavePluginOptionsSuppress();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance?.Logger?.Warn("Remote Deep Delete could not synchronize main plugin options: " + ex.Message);
+            }
         }
 
         private static void EnsureLoaded()
