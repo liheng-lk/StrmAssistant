@@ -13,6 +13,7 @@ namespace StrmAssistant.Compatibility
         public bool ExecuteAsyncPatched { get; set; }
         public long TransactionsObserved { get; set; }
         public long PlansSucceeded { get; set; }
+        public long PreflightBlocked { get; set; }
         public long CandidatesSelected { get; set; }
         public long SidecarTransactionsSucceeded { get; set; }
         public long SidecarTransactionsFailed { get; set; }
@@ -28,10 +29,12 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// Optional transaction extension. The main remote object must already have been verified missing by
-    /// RemoteDeepDeleteService. Only then are conservative same-stem OpenList sidecars enumerated/deleted.
-    /// A sidecar failure changes the overall result back to Success=false, which prevents local STRM/Emby
-    /// deletion and makes the operation safely retryable on the next request.
+    /// Optional transaction extension for OpenList remote deep delete.
+    ///
+    /// The sidecar directory listing is frozen in a prefix before the main destructive request. If the
+    /// listing is unreadable/truncated/unsafe, the main remote file is not touched. After the main file
+    /// is verified missing, only candidates from that frozen conservative plan are removed and verified.
+    /// Local STRM/Emby deletion remains blocked until both stages complete.
     /// </summary>
     public sealed class OpenListRemoteSidecarDeleteEntryPoint : IServerEntryPoint
     {
@@ -54,9 +57,11 @@ namespace StrmAssistant.Compatibility
                 }
 
                 _harmony = new Harmony(HarmonyId);
-                _harmony.Patch(target, postfix: new HarmonyMethod(
-                    typeof(OpenListRemoteSidecarDeletePatches).GetMethod(
-                        nameof(OpenListRemoteSidecarDeletePatches.Postfix), BindingFlags.Public | BindingFlags.Static)));
+                var prefix = new HarmonyMethod(typeof(OpenListRemoteSidecarDeletePatches).GetMethod(
+                    nameof(OpenListRemoteSidecarDeletePatches.Prefix), BindingFlags.Public | BindingFlags.Static));
+                var postfix = new HarmonyMethod(typeof(OpenListRemoteSidecarDeletePatches).GetMethod(
+                    nameof(OpenListRemoteSidecarDeletePatches.Postfix), BindingFlags.Public | BindingFlags.Static));
+                _harmony.Patch(target, prefix: prefix, postfix: postfix);
                 status.ExecuteAsyncPatched = true;
             }
             catch (Exception ex)
@@ -77,58 +82,103 @@ namespace StrmAssistant.Compatibility
         private static readonly OpenListRemoteSidecarService Service = new OpenListRemoteSidecarService();
         private static readonly object StatusSync = new object();
 
-        public static void Postfix(RemoteDeepDeletePlan plan, ref Task<RemoteDeepDeleteExecutionResult> __result)
+        /// <summary>
+        /// Freeze the candidate set before the main file is deleted. This intentionally blocks the
+        /// delete call for one bounded OpenList directory-list request; deep delete is rare/destructive,
+        /// and avoiding an irreversible partial state is more important than request-thread throughput.
+        /// </summary>
+        public static bool Prefix(RemoteDeepDeletePlan plan,
+            ref Task<RemoteDeepDeleteExecutionResult> __result,
+            out OpenListRemoteSidecarPlan __state)
         {
-            if (__result == null || plan == null) return;
+            __state = null;
             var options = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
-            if (!options.DeleteAssociatedSidecars || options.Provider != RemoteDeepDeleteProviderType.OpenList) return;
-            __result = CompleteSidecarsAsync(plan, __result);
-        }
-
-        private static async Task<RemoteDeepDeleteExecutionResult> CompleteSidecarsAsync(RemoteDeepDeletePlan plan,
-            Task<RemoteDeepDeleteExecutionResult> original)
-        {
-            var main = await original.ConfigureAwait(false);
-            if (main?.Success != true) return main;
+            if (!options.DeleteAssociatedSidecars || options.Provider != RemoteDeepDeleteProviderType.OpenList)
+                return true;
 
             Increment(status =>
             {
                 status.TransactionsObserved++;
-                status.LastRemotePath = plan.RemotePath;
+                status.LastRemotePath = plan?.RemotePath;
             });
 
             try
             {
-                var sidecarPlan = await Service.PlanAsync(plan, CancellationToken.None).ConfigureAwait(false);
-                if (!sidecarPlan.Success)
+                var frozen = Service.PlanAsync(plan, CancellationToken.None).GetAwaiter().GetResult();
+                if (frozen?.Success != true)
                 {
+                    var error = frozen?.Error ?? "OpenList sidecar preflight did not return a valid plan.";
                     Increment(status =>
                     {
+                        status.PreflightBlocked++;
                         status.SidecarTransactionsFailed++;
-                        status.LastError = sidecarPlan.Error;
+                        status.LastError = error;
                     });
-                    main.Success = false;
-                    main.Error = "Main remote target is verified deleted, but associated sidecar planning failed; local deletion was blocked for retry: " +
-                                 sidecarPlan.Error;
-                    return main;
+                    __result = Task.FromResult(new RemoteDeepDeleteExecutionResult
+                    {
+                        Success = false,
+                        Provider = plan?.Provider,
+                        RemotePath = plan?.RemotePath,
+                        Error = "Associated sidecar preflight failed before the main remote object was touched: " + error
+                    });
+                    return false;
                 }
 
+                __state = frozen;
                 Increment(status =>
                 {
                     status.PlansSucceeded++;
-                    status.CandidatesSelected += sidecarPlan.Candidates?.Count ?? 0;
+                    status.CandidatesSelected += frozen.Candidates?.Count ?? 0;
+                    status.LastError = null;
                 });
-                if (sidecarPlan.Candidates == null || sidecarPlan.Candidates.Count == 0)
+                return true;
+            }
+            catch (Exception ex)
+            {
+                var error = ex.GetBaseException().Message;
+                Increment(status =>
                 {
-                    Increment(status =>
-                    {
-                        status.SidecarTransactionsSucceeded++;
-                        status.LastError = null;
-                    });
-                    return main;
-                }
+                    status.PreflightBlocked++;
+                    status.SidecarTransactionsFailed++;
+                    status.LastError = error;
+                });
+                __result = Task.FromResult(new RemoteDeepDeleteExecutionResult
+                {
+                    Success = false,
+                    Provider = plan?.Provider,
+                    RemotePath = plan?.RemotePath,
+                    Error = "Associated sidecar preflight threw before the main remote object was touched: " + error
+                });
+                return false;
+            }
+        }
 
-                var sidecars = await Service.DeleteAndVerifyAsync(plan, sidecarPlan, CancellationToken.None)
+        public static void Postfix(RemoteDeepDeletePlan plan, OpenListRemoteSidecarPlan __state,
+            ref Task<RemoteDeepDeleteExecutionResult> __result)
+        {
+            if (__result == null || plan == null || __state == null) return;
+            __result = CompleteSidecarsAsync(plan, __state, __result);
+        }
+
+        private static async Task<RemoteDeepDeleteExecutionResult> CompleteSidecarsAsync(RemoteDeepDeletePlan plan,
+            OpenListRemoteSidecarPlan frozenPlan, Task<RemoteDeepDeleteExecutionResult> original)
+        {
+            var main = await original.ConfigureAwait(false);
+            if (main?.Success != true) return main;
+
+            if (frozenPlan.Candidates == null || frozenPlan.Candidates.Count == 0)
+            {
+                Increment(status =>
+                {
+                    status.SidecarTransactionsSucceeded++;
+                    status.LastError = null;
+                });
+                return main;
+            }
+
+            try
+            {
+                var sidecars = await Service.DeleteAndVerifyAsync(plan, frozenPlan, CancellationToken.None)
                     .ConfigureAwait(false);
                 if (sidecars.Success)
                 {
@@ -149,7 +199,8 @@ namespace StrmAssistant.Compatibility
                     status.LastError = sidecars.Error;
                 });
                 main.Success = false;
-                main.Error = "Main remote target is verified deleted, but associated sidecar cleanup failed; local deletion was blocked so retry can finish cleanup: " +
+                main.Error = "Main remote target is verified deleted, but associated sidecar cleanup failed; " +
+                             "local deletion was blocked. Retry is safe because sidecar mode requires missing main targets to be idempotent: " +
                              sidecars.Error;
                 Plugin.Instance?.Logger?.Warn(main.Error);
                 return main;
@@ -162,8 +213,8 @@ namespace StrmAssistant.Compatibility
                     status.LastError = ex.GetBaseException().Message;
                 });
                 main.Success = false;
-                main.Error = "Main remote target is verified deleted, but associated sidecar cleanup threw an exception; local deletion was blocked: " +
-                             ex.GetBaseException().Message;
+                main.Error = "Main remote target is verified deleted, but associated sidecar cleanup threw an exception; " +
+                             "local deletion was blocked: " + ex.GetBaseException().Message;
                 return main;
             }
         }
