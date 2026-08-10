@@ -188,7 +188,7 @@ namespace StrmAssistant.MediaEnhance
                 fresh.RunTimeTicks = record.RunTimeTicks;
                 fresh.Size = record.Size;
                 fresh.Container = record.Container;
-                fresh.TotalBitrate = record.TotalBitrate;
+                fresh.TotalBitrate = (int)Math.Max(0L, Math.Min((long)int.MaxValue, record.TotalBitrate));
                 fresh.Width = record.Width;
                 fresh.Height = record.Height;
 
