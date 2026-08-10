@@ -81,16 +81,6 @@ namespace StrmAssistant.Api
             if (!Enum.TryParse(request.Provider ?? string.Empty, true, out RemoteDeepDeleteProviderType provider))
                 provider = RemoteDeepDeleteProviderType.None;
 
-            if (request.Enabled && !request.Confirm)
-                throw new InvalidOperationException("Enabling remote deletion requires Confirm=true.");
-            if (request.DeleteAssociatedSidecars && !request.Confirm)
-                throw new InvalidOperationException("Enabling remote sidecar deletion requires Confirm=true.");
-            if (request.DeleteAssociatedSidecars && provider != RemoteDeepDeleteProviderType.OpenList)
-                throw new InvalidOperationException("Associated remote sidecar deletion is supported only with the OpenList provider.");
-            if (request.DeleteAssociatedSidecars && !request.TreatNotFoundAsSuccess)
-                throw new InvalidOperationException(
-                    "Associated remote sidecar deletion requires TreatNotFoundAsSuccess=true so a partially completed transaction can be retried idempotently after the main remote file is already gone.");
-
             var current = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
             var next = new RemoteDeepDeleteOptions
             {
@@ -106,6 +96,8 @@ namespace StrmAssistant.Api
                 TreatNotFoundAsSuccess = request.TreatNotFoundAsSuccess,
                 DeleteAssociatedSidecars = request.DeleteAssociatedSidecars
             };
+
+            ValidateBeforeSave(next, request.Confirm);
             return ToView(RemoteDeepDeleteRuntimeSettings.Save(next));
         }
 
@@ -115,6 +107,40 @@ namespace StrmAssistant.Api
             return item == null
                 ? new RemoteDeepDeletePlan { Error = "Item was not found or id is invalid." }
                 : _remoteService.BuildPlan(item);
+        }
+
+        private static void ValidateBeforeSave(RemoteDeepDeleteOptions next, bool confirm)
+        {
+            if (next == null) throw new ArgumentNullException(nameof(next));
+            if (!next.Enabled)
+            {
+                if (next.DeleteAssociatedSidecars)
+                    throw new InvalidOperationException("Remote sidecar deletion cannot remain enabled while remote deep delete is disabled.");
+                return;
+            }
+
+            if (!confirm)
+                throw new InvalidOperationException("Enabling or changing active remote deletion settings requires Confirm=true.");
+            if (Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions?.EnableDeepDelete != true)
+                throw new InvalidOperationException("The master Deep Delete option must be enabled before remote deletion can be enabled.");
+            if (next.Provider == RemoteDeepDeleteProviderType.None)
+                throw new InvalidOperationException("A remote deletion provider must be selected.");
+            if (!Uri.TryCreate(next.BaseUrl, UriKind.Absolute, out var baseUri) ||
+                (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps))
+                throw new InvalidOperationException("Remote deletion BaseUrl must be an absolute HTTP/HTTPS URL.");
+            if (RemoteDeepDeleteRuntimeSettings.ParseAllowedRoots(next.AllowedRemoteRoots).Count == 0)
+                throw new InvalidOperationException("At least one allowed remote root must be configured before enabling destructive remote calls.");
+            if (next.Provider == RemoteDeepDeleteProviderType.OpenList && string.IsNullOrWhiteSpace(next.AccessToken))
+                throw new InvalidOperationException("OpenList remote deletion requires a non-empty AccessToken.");
+
+            if (next.DeleteAssociatedSidecars)
+            {
+                if (next.Provider != RemoteDeepDeleteProviderType.OpenList)
+                    throw new InvalidOperationException("Associated remote sidecar deletion is supported only with the OpenList provider.");
+                if (!next.TreatNotFoundAsSuccess)
+                    throw new InvalidOperationException(
+                        "Associated remote sidecar deletion requires TreatNotFoundAsSuccess=true so a partially completed transaction can be retried idempotently after the main remote file is already gone.");
+            }
         }
 
         private MediaBrowser.Controller.Entities.BaseItem ResolveItem(string id)
