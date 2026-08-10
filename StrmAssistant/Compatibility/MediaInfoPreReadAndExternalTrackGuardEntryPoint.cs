@@ -4,11 +4,9 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Model.Entities;
-using StrmAssistant.Common;
 using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
@@ -37,14 +35,9 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// Prevents two runtime failure modes which are especially painful for STRM/cloud media:
-    /// 1) a provider/library refresh removes database MediaStreams and the first playback then pays for a new probe;
-    /// 2) an external subtitle/audio reconciliation observes an incomplete stream baseline and replaces the repository
-    ///    with only external tracks.
-    ///
-    /// The guard never probes media. It only restores an already persisted StrmAssistant snapshot and refuses an
-    /// unsafe external-track write. All patches are runtime-discovered so an Emby signature change disables only the
-    /// affected guard instead of preventing the plugin from loading.
+    /// Restores validated persisted core MediaInfo before playback/static media-source reads and
+    /// protects internal A/V streams from being replaced by an external-track-only refresh.
+    /// No media probe is executed by this guard.
     /// </summary>
     public sealed class MediaInfoPreReadAndExternalTrackGuardEntryPoint : IServerEntryPoint
     {
@@ -55,11 +48,9 @@ namespace StrmAssistant.Compatibility
         {
             var status = new MediaInfoPreReadGuardStatus();
             MediaInfoPreReadGuardState.Status = status;
-
             try
             {
                 _harmony = new Harmony(HarmonyId);
-
                 var mediaSourceManager = Plugin.Instance?.ApplicationHost?.Resolve<IMediaSourceManager>();
                 if (mediaSourceManager != null)
                 {
@@ -67,6 +58,7 @@ namespace StrmAssistant.Compatibility
                         .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                         .Where(method =>
                             (string.Equals(method.Name, "GetPlaybackMediaSources", StringComparison.Ordinal) ||
+                             string.Equals(method.Name, "GetPlayackMediaSources", StringComparison.Ordinal) ||
                              string.Equals(method.Name, "GetStaticMediaSources", StringComparison.Ordinal)) &&
                             method.GetParameters().Any(parameter => typeof(BaseItem).IsAssignableFrom(parameter.ParameterType)))
                         .Distinct()
@@ -88,8 +80,8 @@ namespace StrmAssistant.Compatibility
                     }
                 }
 
-                var externalTrackTarget = typeof(SubtitleApi).GetMethod(
-                    nameof(SubtitleApi.UpdateExternalSubtitles), BindingFlags.Instance | BindingFlags.Public);
+                var externalTrackTarget = typeof(Common.SubtitleApi).GetMethod(
+                    nameof(Common.SubtitleApi.UpdateExternalSubtitles), BindingFlags.Instance | BindingFlags.Public);
                 if (externalTrackTarget != null)
                 {
                     _harmony.Patch(externalTrackTarget,
@@ -101,7 +93,7 @@ namespace StrmAssistant.Compatibility
                 }
 
                 if (status.MediaSourceTargetsPatched == 0)
-                    status.Error = "No compatible IMediaSourceManager GetPlaybackMediaSources/GetStaticMediaSources target was found.";
+                    status.Error = "No compatible playback/static MediaSourceManager target was found.";
             }
             catch (Exception ex)
             {
@@ -112,8 +104,7 @@ namespace StrmAssistant.Compatibility
 
         public void Dispose()
         {
-            try { _harmony?.UnpatchAll(HarmonyId); }
-            catch { }
+            try { _harmony?.UnpatchAll(HarmonyId); } catch { }
         }
     }
 
@@ -133,31 +124,19 @@ namespace StrmAssistant.Compatibility
         public static void MediaSourceReadPrefix(object[] __args)
         {
             if (RecoveryDepth.Value > 0 || __args == null) return;
-
-            var itemIndex = -1;
-            BaseItem item = null;
-            for (var index = 0; index < __args.Length; index++)
-            {
-                if (__args[index] is BaseItem candidate)
-                {
-                    itemIndex = index;
-                    item = candidate;
-                    break;
-                }
-            }
-
-            if (item == null || HasInternalAv(item)) return;
-            if (!MediaInfoIntegrityMonitor.SnapshotExists(item)) return;
+            var itemIndex = FindItem(__args, out var item);
+            if (item == null || MediaInfoIntegrityService.IsCoreMediaInfoComplete(item)) return;
+            if (!MediaInfoIntegrityService.SnapshotExists(item)) return;
             if (!MediaInfoIntegrityMonitor.PersistenceEnabledFor(item,
                     Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions)) return;
+            if (Plugin.LibraryApi?.IsLibraryInScope(item) != true) return;
 
             Increment(status => status.PreReadRestoreAttempts++);
             SetLastItem(item.Path);
-
             try
             {
                 RecoveryDepth.Value++;
-                if (TryRestoreSnapshot(item, "PreRead MediaSource Guard"))
+                if (MediaInfoIntegrityService.HydrateCore(item, "PreRead MediaSource Guard"))
                 {
                     Increment(status => status.PreReadRestoreSucceeded++);
                     var fresh = ResolveItem(item.InternalId);
@@ -184,28 +163,16 @@ namespace StrmAssistant.Compatibility
         {
             __state = new ExternalTrackGuardState();
             if (__args == null) return true;
-
-            var itemIndex = -1;
-            BaseItem item = null;
-            for (var index = 0; index < __args.Length; index++)
-            {
-                if (__args[index] is BaseItem candidate)
-                {
-                    itemIndex = index;
-                    item = candidate;
-                    break;
-                }
-            }
-
+            var itemIndex = FindItem(__args, out var item);
             if (item == null) return true;
+
             var fresh = ResolveItem(item.InternalId) ?? item;
             var baseline = SafeStreams(fresh);
-
-            if (CountInternalAv(baseline) == 0 && MediaInfoIntegrityMonitor.SnapshotExists(fresh))
+            if (CountInternalAv(baseline) == 0 && MediaInfoIntegrityService.SnapshotExists(fresh))
             {
                 try
                 {
-                    if (TryRestoreSnapshot(fresh, "ExternalTrack Baseline Guard"))
+                    if (MediaInfoIntegrityService.HydrateCore(fresh, "ExternalTrack Baseline Guard"))
                     {
                         fresh = ResolveItem(item.InternalId) ?? fresh;
                         baseline = SafeStreams(fresh);
@@ -221,14 +188,12 @@ namespace StrmAssistant.Compatibility
             var internalCount = CountInternalAv(baseline);
             if (internalCount == 0)
             {
-                // External-track discovery must never become the authority for internal video/audio streams.
-                // Wait for native extraction or snapshot recovery and let a later scan reconcile the sidecars.
                 __state.SkippedOriginal = true;
                 __result = Task.CompletedTask;
                 Increment(status => status.ExternalTrackWritesBlocked++);
                 SetLastItem(fresh.Path);
                 Plugin.Instance?.Logger?.Warn(
-                    "ExternalTrack guard blocked SaveMediaStreams because no internal A/V baseline is available: {0}",
+                    "ExternalTrack guard blocked stream replacement because no internal A/V baseline is available: {0}",
                     fresh.Path);
                 return false;
             }
@@ -249,14 +214,11 @@ namespace StrmAssistant.Compatibility
         private static async Task VerifyExternalTrackWriteAsync(Task original, ExternalTrackGuardState state)
         {
             await original.ConfigureAwait(false);
-
             var fresh = ResolveItem(state.ItemId);
             if (fresh == null) return;
             var current = SafeStreams(fresh);
             if (CountInternalAv(current) > 0) return;
 
-            // A refresh race occurred between the prefix and SubtitleApi.SaveMediaStreams. Restore the exact
-            // non-managed baseline and keep the newly discovered external file tracks, then persist the repaired state.
             try
             {
                 var repaired = state.PreservedBaselineStreams
@@ -272,7 +234,8 @@ namespace StrmAssistant.Compatibility
                     "ExternalTrack guard repaired an unsafe stream replacement after sidecar reconciliation: {0}",
                     fresh.Path);
 
-                if (MediaInfoIntegrityMonitor.PersistenceEnabledFor(fresh,
+                var refreshed = ResolveItem(state.ItemId) ?? fresh;
+                if (MediaInfoIntegrityMonitor.PersistenceEnabledFor(refreshed,
                         Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions))
                 {
                     var directoryService = Plugin.MediaInfoApi.GetMediaInfoRefreshOptions().DirectoryService;
@@ -287,48 +250,29 @@ namespace StrmAssistant.Compatibility
             }
         }
 
-        private static bool TryRestoreSnapshot(BaseItem item, string source)
+        private static int FindItem(object[] args, out BaseItem item)
         {
-            if (item == null || Plugin.MediaInfoApi == null) return false;
-
-            var primary = MediaInfoApi.GetMediaInfoJsonPath(item);
-            var backup = MediaInfoPersistenceReliabilityPatches.BackupPath(primary);
-            if (!File.Exists(primary) && File.Exists(backup))
+            item = null;
+            if (args == null) return -1;
+            for (var index = 0; index < args.Length; index++)
             {
-                var parent = Path.GetDirectoryName(primary);
-                if (!string.IsNullOrWhiteSpace(parent)) Directory.CreateDirectory(parent);
-                File.Copy(backup, primary, true);
+                if (!(args[index] is BaseItem candidate)) continue;
+                item = candidate;
+                return index;
             }
-            if (!File.Exists(primary)) return false;
-
-            var directoryService = Plugin.MediaInfoApi.GetMediaInfoRefreshOptions().DirectoryService;
-            var ignoreFileChange = item.IsShortcut || !item.IsFileProtocol ||
-                                   string.Equals(Path.GetExtension(item.Path), ".strm", StringComparison.OrdinalIgnoreCase);
-            return Plugin.MediaInfoApi.DeserializeMediaInfo(item, directoryService, source, ignoreFileChange)
-                .GetAwaiter().GetResult();
+            return -1;
         }
 
         private static BaseItem ResolveItem(long itemId)
         {
-            try
-            {
-                return Plugin.Instance?.ApplicationHost?.Resolve<ILibraryManager>()?.GetItemById(itemId);
-            }
-            catch
-            {
-                return null;
-            }
+            try { return Plugin.Instance?.ApplicationHost?.Resolve<ILibraryManager>()?.GetItemById(itemId); }
+            catch { return null; }
         }
 
         private static List<MediaStream> SafeStreams(BaseItem item)
         {
             try { return item?.GetMediaStreams()?.Where(stream => stream != null).ToList() ?? new List<MediaStream>(); }
             catch { return new List<MediaStream>(); }
-        }
-
-        private static bool HasInternalAv(BaseItem item)
-        {
-            return CountInternalAv(SafeStreams(item)) > 0 && item?.RunTimeTicks.HasValue == true;
         }
 
         private static int CountInternalAv(IEnumerable<MediaStream> streams)
@@ -356,8 +300,7 @@ namespace StrmAssistant.Compatibility
         {
             lock (StatusSync)
             {
-                if (MediaInfoPreReadGuardState.Status != null)
-                    MediaInfoPreReadGuardState.Status.LastItemPath = path;
+                if (MediaInfoPreReadGuardState.Status != null) MediaInfoPreReadGuardState.Status.LastItemPath = path;
             }
         }
 
@@ -365,8 +308,7 @@ namespace StrmAssistant.Compatibility
         {
             lock (StatusSync)
             {
-                if (MediaInfoPreReadGuardState.Status != null)
-                    MediaInfoPreReadGuardState.Status.LastError = error;
+                if (MediaInfoPreReadGuardState.Status != null) MediaInfoPreReadGuardState.Status.LastError = error;
             }
         }
     }
