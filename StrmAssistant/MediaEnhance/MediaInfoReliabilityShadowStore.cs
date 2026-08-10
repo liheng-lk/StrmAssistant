@@ -16,7 +16,7 @@ namespace StrmAssistant.MediaEnhance
 {
     public sealed class MediaInfoReliabilityShadowRecord
     {
-        public int SchemaVersion { get; set; } = 2;
+        public int SchemaVersion { get; set; } = 3;
         public string SourcePath { get; set; }
         public string ShortcutTargetFingerprint { get; set; }
         public string CapturedUtc { get; set; }
@@ -50,6 +50,7 @@ namespace StrmAssistant.MediaEnhance
     /// </summary>
     public static class MediaInfoReliabilityShadowStore
     {
+        private const int CurrentSchemaVersion = 3;
         private static readonly object Sync = new object();
         private static readonly Dictionary<long, DateTimeOffset> LastCapture = new Dictionary<long, DateTimeOffset>();
         public static MediaInfoReliabilityShadowStatus Status { get; } = new MediaInfoReliabilityShadowStatus();
@@ -117,6 +118,7 @@ namespace StrmAssistant.MediaEnhance
 
                 var record = new MediaInfoReliabilityShadowRecord
                 {
+                    SchemaVersion = CurrentSchemaVersion,
                     SourcePath = fresh.Path,
                     ShortcutTargetFingerprint = targetFingerprint,
                     CapturedUtc = DateTimeOffset.UtcNow.ToString("O"),
@@ -257,7 +259,7 @@ namespace StrmAssistant.MediaEnhance
                 if (serializer == null) return false;
                 record = serializer.DeserializeFromFileAsync<MediaInfoReliabilityShadowRecord>(path)
                     .GetAwaiter().GetResult();
-                if (record == null || record.SchemaVersion != 2 ||
+                if (record == null || record.SchemaVersion != CurrentSchemaVersion ||
                     record.RunTimeTicks.GetValueOrDefault() <= 0 || record.MediaStreams == null ||
                     record.MediaStreams.Any(stream => stream?.IsExternal == true) ||
                     !HasExpectedCoreStream(item, record.MediaStreams))
