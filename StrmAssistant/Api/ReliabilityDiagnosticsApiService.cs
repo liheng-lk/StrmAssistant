@@ -24,9 +24,11 @@ namespace StrmAssistant.Api
         public bool HasCredentials { get; set; }
         public string AllowedRemoteRoots { get; set; }
         public bool HasManualPathMappings { get; set; }
+        public bool DeleteAssociatedSidecars { get; set; }
         public RemoteDeepDeletePlan Plan { get; set; }
         public RemoteDeepDeleteProbeResult Probe { get; set; }
         public OpenListDirectLinkDeepDeleteStatus OpenListDirectLinkBridge { get; set; }
+        public OpenListRemoteSidecarDeleteStatus OpenListSidecarDelete { get; set; }
         public NativeItemDeleteRemoteBridgeStatus NativeDeleteBridge { get; set; }
         public NativeRemoteDeleteTransactionStatus NativeDeleteTransaction { get; set; }
     }
@@ -45,6 +47,8 @@ namespace StrmAssistant.Api
         public MediaInfoReliabilityShadowStatus MediaInfoShadow { get; set; }
         public MediaInfoReliabilityShadowRuntimeStatus MediaInfoShadowCaptureHook { get; set; }
         public MediaInfoReliabilityShadowUpdateStatus MediaInfoShadowUpdateHook { get; set; }
+        public MediaInfoReliabilitySeedMigrationStatus MediaInfoShadowMigration { get; set; }
+        public ExplicitMediaInfoClearReliabilityStatus ExplicitMediaInfoClearInvalidation { get; set; }
         public RemoteDeleteReliabilitySummary RemoteDelete { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
@@ -95,6 +99,8 @@ namespace StrmAssistant.Api
                 MediaInfoShadow = MediaInfoReliabilityShadowStore.Status,
                 MediaInfoShadowCaptureHook = MediaInfoReliabilityShadowRuntimeState.Status,
                 MediaInfoShadowUpdateHook = MediaInfoReliabilityShadowUpdateState.Status,
+                MediaInfoShadowMigration = MediaInfoReliabilitySeedMigrationState.Status,
+                ExplicitMediaInfoClearInvalidation = ExplicitMediaInfoClearReliabilityState.Status,
                 RemoteDelete = new RemoteDeleteReliabilitySummary
                 {
                     Enabled = remoteOptions.Enabled,
@@ -105,9 +111,11 @@ namespace StrmAssistant.Api
                                      !string.IsNullOrWhiteSpace(remoteOptions.Password),
                     AllowedRemoteRoots = remoteOptions.AllowedRemoteRoots,
                     HasManualPathMappings = RemoteDeepDeleteRuntimeSettings.ParseMappings(remoteOptions.PathMappings).Count > 0,
+                    DeleteAssociatedSidecars = remoteOptions.DeleteAssociatedSidecars,
                     Plan = remotePlan,
                     Probe = probe,
                     OpenListDirectLinkBridge = OpenListDirectLinkDeepDeleteState.Status,
+                    OpenListSidecarDelete = OpenListRemoteSidecarDeleteState.Status,
                     NativeDeleteBridge = NativeItemDeleteRemoteBridgeState.Status,
                     NativeDeleteTransaction = NativeRemoteDeleteTransactionState.Status
                 }
@@ -118,19 +126,25 @@ namespace StrmAssistant.Api
             if (report.MediaInfo?.PlaybackProbeRisk == true)
                 report.Warnings.Add("Core MediaInfo is incomplete and no validated local recovery source exists. One explicit MediaInfo extraction is required before this item can be protected from future loss.");
             if (shadowApplicable && report.MediaInfo?.CoreMediaInfoComplete == true && !shadowValid)
-                report.Warnings.Add("This STRM currently has complete MediaInfo but no valid reliability shadow for its current target. Startup seeding or the next successful MediaInfo update should create one.");
+                report.Warnings.Add("This STRM currently has complete MediaInfo but no valid schema-v3 reliability shadow for its current target. Startup migration or the next successful MediaInfo update should create one.");
             if (report.MediaInfoPreReadGuard?.MediaSourceTargetsPatched <= 0)
                 report.Warnings.Add("No playback/static MediaSourceManager pre-read target is active; recoverable MediaInfo may not be hydrated before playback.");
             if (report.MediaInfoShadowCaptureHook?.SaveMediaStreamsTargetsPatched <= 0)
                 report.Warnings.Add("No SaveMediaStreams capture hook is active; newly extracted STRM MediaInfo may not be copied into the reliability shadow automatically.");
             if (report.MediaInfoShadowUpdateHook?.UpdateItemsTargetsPatched <= 0)
                 report.Warnings.Add("No UpdateItems shadow capture hook is active; a MediaInfo transaction that writes streams before runtime/container fields may miss automatic shadow capture.");
+            if (report.MediaInfoShadowMigration?.Error != null)
+                report.Warnings.Add("The schema-v3 STRM shadow startup migration failed and will retry on a later startup: " + report.MediaInfoShadowMigration.Error);
             if (remoteOptions.Enabled && remotePlan?.Applicable == true && !remotePlan.Allowed)
                 report.Warnings.Add("The item resolves to a remote target, but the remote deletion plan is blocked: " + remotePlan.Error);
             if (remoteOptions.Enabled && NativeItemDeleteRemoteBridgeState.Status?.ExplicitDeleteTargetsPatched == 0)
                 report.Warnings.Add("Remote Deep Delete is enabled, but no native Emby single-item delete route is currently patched. Use the plugin Deep Delete API until the runtime target is resolved.");
             if (request?.ProbeRemote == true && probe != null && !probe.Success)
                 report.Warnings.Add("Remote target probe failed: " + probe.Error);
+            if (remoteOptions.DeleteAssociatedSidecars && remoteOptions.Provider != RemoteDeepDeleteProviderType.OpenList)
+                report.Warnings.Add("Remote sidecar cleanup is enabled but currently supported only for OpenList; the selected provider will delete only the main remote object.");
+            if (remoteOptions.DeleteAssociatedSidecars && OpenListRemoteSidecarDeleteState.Status?.ExecuteAsyncPatched != true)
+                report.Warnings.Add("OpenList remote sidecar cleanup is enabled, but its transaction extension is not patched into RemoteDeepDeleteService.ExecuteAsync.");
 
             var transaction = NativeRemoteDeleteTransactionState.Status;
             if (transaction?.LocalDeletesFailedAfterRemoteSuccess > 0 ||
