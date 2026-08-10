@@ -51,8 +51,6 @@ namespace StrmAssistant.MediaEnhance
             var item = e?.Argument?.Item;
             if (item == null) return;
 
-            // A successful refresh is the safest moment to refresh the independent STRM shadow.
-            // This works even when the user intentionally leaves PersistMediaInfoMode=None.
             if (MediaInfoReliabilityShadowStore.AppliesTo(item) &&
                 MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
             {
@@ -130,11 +128,6 @@ namespace StrmAssistant.MediaEnhance
         }
     }
 
-    /// <summary>
-    /// Recovery pass after an explicit/full library scan. No startup-wide warm-up is performed:
-    /// large STRM libraries therefore do not compete with normal startup or first playback for DB/IO.
-    /// The pre-read guard handles individual playback on demand.
-    /// </summary>
     public sealed class MediaInfoIntegrityPostScanTask : ILibraryPostScanTask
     {
         private readonly ILibraryManager _libraryManager;
@@ -159,7 +152,7 @@ namespace StrmAssistant.MediaEnhance
             }) ?? Array.Empty<BaseItem>();
 
             var candidates = items
-                .Where(ShouldRecover)
+                .Where(MediaInfoIntegrityMonitor.ShouldRecover)
                 .GroupBy(item => item.InternalId)
                 .Select(group => group.First())
                 .ToList();
