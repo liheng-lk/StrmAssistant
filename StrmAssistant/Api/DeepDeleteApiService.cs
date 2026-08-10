@@ -5,6 +5,7 @@ using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Services;
 using StrmAssistant.Compatibility;
 using StrmAssistant.Experience;
+using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -59,11 +60,6 @@ namespace StrmAssistant.Api
         public string Reason { get; set; }
     }
 
-    /// <summary>
-    /// Explicit deep-delete API. Remote deletion is composed directly here rather than relying on
-    /// a Harmony interception. If a remote STRM is detected, mapping/provider errors are surfaced
-    /// and the request never silently falls back to deleting only the local STRM.
-    /// </summary>
     public sealed class DeepDeleteApiService : BaseApiService
     {
         private readonly ILibraryManager _libraryManager;
@@ -237,6 +233,7 @@ namespace StrmAssistant.Api
                     Plugin.MediaInfoApi.DeleteMediaInfoJson(item, directoryService, "Explicit Deep Delete");
                     var backup = MediaInfoPersistenceReliabilityPatches.BackupPath(primary);
                     if (!string.IsNullOrWhiteSpace(backup) && File.Exists(backup)) File.Delete(backup);
+                    MediaInfoReliabilityShadowStore.Delete(item);
                 }
                 finally
                 {
@@ -245,7 +242,7 @@ namespace StrmAssistant.Api
             }
             catch (Exception ex)
             {
-                response.Warnings.Add("MediaInfo persistence cleanup failed: " + ex.Message);
+                response.Warnings.Add("MediaInfo persistence/shadow cleanup failed: " + ex.Message);
             }
         }
 
