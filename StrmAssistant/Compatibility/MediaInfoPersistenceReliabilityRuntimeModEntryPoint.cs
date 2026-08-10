@@ -28,6 +28,7 @@ namespace StrmAssistant.Compatibility
         public long BackupRestoresSucceeded { get; set; }
         public long BackupRestoresFailed { get; set; }
         public long InvalidSnapshotsRejected { get; set; }
+        public long ExplicitDeleteShadowsCleared { get; set; }
         public string Error { get; set; }
     }
 
@@ -156,9 +157,24 @@ namespace StrmAssistant.Compatibility
             }
         }
 
-        public static bool DeleteMediaInfoJsonPrefix(string source)
+        public static bool DeleteMediaInfoJsonPrefix(BaseItem item, string source)
         {
-            if (ExplicitDeleteDepth.Value > 0) return true;
+            if (ExplicitDeleteDepth.Value > 0)
+            {
+                try
+                {
+                    if (item != null && MediaInfoReliabilityShadowStore.AppliesTo(item))
+                    {
+                        MediaInfoReliabilityShadowStore.Delete(item);
+                        IncrementCounter(Counter.ExplicitDeleteShadowsCleared);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Instance?.Logger?.Warn("MediaInfo reliability - explicit shadow cleanup failed: " + ex.Message);
+                }
+                return true;
+            }
             if (string.IsNullOrWhiteSpace(source)) return true;
 
             if (source.IndexOf("Item Removed", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -290,7 +306,8 @@ namespace StrmAssistant.Compatibility
             BackupSnapshotsCreated,
             BackupRestoresSucceeded,
             BackupRestoresFailed,
-            InvalidSnapshotsRejected
+            InvalidSnapshotsRejected,
+            ExplicitDeleteShadowsCleared
         }
 
         private static void IncrementCounter(Counter counter)
@@ -307,6 +324,7 @@ namespace StrmAssistant.Compatibility
                     case Counter.BackupRestoresSucceeded: status.BackupRestoresSucceeded++; break;
                     case Counter.BackupRestoresFailed: status.BackupRestoresFailed++; break;
                     case Counter.InvalidSnapshotsRejected: status.InvalidSnapshotsRejected++; break;
+                    case Counter.ExplicitDeleteShadowsCleared: status.ExplicitDeleteShadowsCleared++; break;
                 }
             }
         }
