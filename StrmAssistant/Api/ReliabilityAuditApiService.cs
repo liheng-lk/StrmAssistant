@@ -18,6 +18,8 @@ namespace StrmAssistant.Api
     {
         public bool Included { get; set; }
         public int TotalStrmItems { get; set; }
+        public int InScopeStrmItems { get; set; }
+        public int OutOfScopeStrmItems { get; set; }
         public int CoreMediaInfoComplete { get; set; }
         public int ValidV3Shadow { get; set; }
         public int CompleteButMissingShadow { get; set; }
@@ -40,6 +42,7 @@ namespace StrmAssistant.Api
         public MediaInfoReliabilitySeedMigrationStatus MediaInfoShadowMigration { get; set; }
         public ExplicitMediaInfoClearReliabilityStatus ExplicitMediaInfoClearInvalidation { get; set; }
         public RemoteDeepDeleteCapabilityStatus RemoteDeepDelete { get; set; }
+        public RemoteDeepDeleteProbeSafetyStatus RemoteProbeSafety { get; set; }
         public OpenListDirectLinkDeepDeleteStatus OpenListDirectLinkBridge { get; set; }
         public OpenListRemoteSidecarDeleteStatus OpenListSidecars { get; set; }
         public NativeItemDeleteRemoteBridgeStatus NativeDeleteBridge { get; set; }
@@ -87,6 +90,7 @@ namespace StrmAssistant.Api
                 MediaInfoShadowMigration = MediaInfoReliabilitySeedMigrationState.Status,
                 ExplicitMediaInfoClearInvalidation = ExplicitMediaInfoClearReliabilityState.Status,
                 RemoteDeepDelete = RemoteDeepDeleteModState.Status,
+                RemoteProbeSafety = RemoteDeepDeleteProbeSafetyState.Status,
                 OpenListDirectLinkBridge = OpenListDirectLinkDeepDeleteState.Status,
                 OpenListSidecars = OpenListRemoteSidecarDeleteState.Status,
                 NativeDeleteBridge = NativeItemDeleteRemoteBridgeState.Status,
@@ -116,6 +120,9 @@ namespace StrmAssistant.Api
                 result.Warnings.Add("No SaveMediaStreams STRM shadow capture hook is active.");
             if (result.MediaInfoShadowUpdateHook?.UpdateItemsTargetsPatched <= 0)
                 result.Warnings.Add("No UpdateItems STRM shadow completion hook is active.");
+            if (result.MediaInfoShadowMigration?.ManualSeedRequired == true)
+                result.Warnings.Add("STRM shadow schema-v" + result.MediaInfoShadowMigration.SchemaVersion +
+                                    " seed is pending. Run the manual reliability seed task when the library scanner is idle.");
             if (!string.IsNullOrWhiteSpace(result.MediaInfoShadowMigration?.Error))
                 result.Warnings.Add("STRM shadow schema migration: " + result.MediaInfoShadowMigration.Error);
 
@@ -133,8 +140,12 @@ namespace StrmAssistant.Api
                     result.Warnings.Add("Direct remote deep-delete API integration is not active.");
                 if (result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched <= 0)
                     result.Warnings.Add("No native single-item Emby delete route is bridged to remote deletion.");
+                if (remote.Provider == RemoteDeepDeleteProviderType.OpenList && result.RemoteProbeSafety?.Patched != true)
+                    result.Warnings.Add("OpenList remote deletion is enabled but structured probe-result safety normalization is inactive.");
                 if (remote.DeleteAssociatedSidecars && remote.Provider != RemoteDeepDeleteProviderType.OpenList)
                     result.Warnings.Add("Remote sidecar cleanup is enabled but currently implemented only for OpenList.");
+                if (remote.DeleteAssociatedSidecars && !remote.TreatNotFoundAsSuccess)
+                    result.Warnings.Add("Remote sidecar cleanup requires TreatNotFoundAsSuccess=true for idempotent retry after partial completion.");
                 if (remote.DeleteAssociatedSidecars && result.OpenListSidecars?.ExecuteAsyncPatched != true)
                     result.Warnings.Add("OpenList sidecar cleanup is enabled but its ExecuteAsync transaction extension is inactive.");
             }
@@ -147,23 +158,31 @@ namespace StrmAssistant.Api
             {
                 if (result.Inventory.PlaybackProbeRisk > 0)
                     result.Warnings.Add(result.Inventory.PlaybackProbeRisk +
-                                        " STRM items currently have incomplete core MediaInfo and no validated local recovery source; these may require a remote probe on playback.");
+                                        " in-scope STRM items currently have incomplete core MediaInfo and no validated local recovery source; run the STRM MediaInfo repair task while the scanner is idle.");
                 if (result.Inventory.CompleteButMissingShadow > 0)
                     result.Warnings.Add(result.Inventory.CompleteButMissingShadow +
-                                        " complete STRM items are not yet protected by a valid schema-v3 shadow.");
+                                        " complete in-scope STRM items are not yet protected by a valid schema-v3 shadow.");
             }
+
+            var remoteHealthy = !remote.Enabled ||
+                                (remote.Provider != RemoteDeepDeleteProviderType.None &&
+                                 !string.IsNullOrWhiteSpace(remote.BaseUrl) &&
+                                 result.RemoteAllowedRootCount > 0 &&
+                                 result.RemoteCredentialsConfigured &&
+                                 result.RemoteDeepDelete?.DirectApiIntegration == true &&
+                                 result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched > 0 &&
+                                 (remote.Provider != RemoteDeepDeleteProviderType.OpenList ||
+                                  result.RemoteProbeSafety?.Patched == true) &&
+                                 (!remote.DeleteAssociatedSidecars ||
+                                  (remote.Provider == RemoteDeepDeleteProviderType.OpenList &&
+                                   remote.TreatNotFoundAsSuccess &&
+                                   result.OpenListSidecars?.ExecuteAsyncPatched == true)));
 
             result.Healthy = result.MediaInfoPreRead?.MediaSourceTargetsPatched > 0 &&
                              string.IsNullOrWhiteSpace(result.MediaInfoPreRead?.Error) &&
                              string.IsNullOrWhiteSpace(result.MediaInfoPersistence?.Error) &&
                              (result.Inventory?.Included != true || result.Inventory.PlaybackProbeRisk == 0) &&
-                             (!remote.Enabled ||
-                              (remote.Provider != RemoteDeepDeleteProviderType.None &&
-                               !string.IsNullOrWhiteSpace(remote.BaseUrl) &&
-                               result.RemoteAllowedRootCount > 0 &&
-                               result.RemoteCredentialsConfigured &&
-                               result.RemoteDeepDelete?.DirectApiIntegration == true &&
-                               result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched > 0));
+                             remoteHealthy;
             return result;
         }
 
@@ -182,16 +201,23 @@ namespace StrmAssistant.Api
                          .Select(group => group.First()))
             {
                 summary.TotalStrmItems++;
+                if (Plugin.LibraryApi?.IsLibraryInScope(item) != true)
+                {
+                    summary.OutOfScopeStrmItems++;
+                    continue;
+                }
+
+                summary.InScopeStrmItems++;
                 var assessment = MediaInfoIntegrityService.Assess(item);
                 var coreComplete = assessment?.CoreMediaInfoComplete == true;
-                var shadowValid = MediaInfoReliabilityShadowStore.Exists(item);
-                var recoverable = assessment?.Recoverable == true || shadowValid;
+                var shadowValid = assessment?.ShadowSnapshotValid == true;
+                var recoverable = assessment?.Recoverable == true;
 
                 if (coreComplete) summary.CoreMediaInfoComplete++;
                 if (shadowValid) summary.ValidV3Shadow++;
                 if (coreComplete && !shadowValid) summary.CompleteButMissingShadow++;
                 if (!coreComplete && recoverable) summary.IncompleteButRecoverable++;
-                if (recoverable) summary.ProtectedByAnyLocalRecoverySource++;
+                if (recoverable || coreComplete && shadowValid) summary.ProtectedByAnyLocalRecoverySource++;
 
                 if (!coreComplete && !recoverable)
                 {
