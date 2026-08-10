@@ -44,8 +44,8 @@ namespace StrmAssistant.MediaEnhance
 
     /// <summary>
     /// Small plugin-owned shadow store for STRM core playback metadata. This is independent from the
-    /// user's optional MediaInfo JSON persistence mode and stores no raw STRM target URL: only a
-    /// SHA-256 fingerprint is persisted so URL query tokens are never copied into the shadow cache.
+    /// user's optional MediaInfo JSON persistence mode. It stores neither the raw STRM target URL nor
+    /// external-track paths: only internal streams plus a SHA-256 target fingerprint are persisted.
     /// </summary>
     public static class MediaInfoReliabilityShadowStore
     {
@@ -92,13 +92,6 @@ namespace StrmAssistant.MediaEnhance
                     return false;
                 }
 
-                var targetFingerprint = ComputeShortcutTargetFingerprint(fresh);
-                if (string.IsNullOrWhiteSpace(targetFingerprint))
-                {
-                    Increment(status => status.CapturesSkipped++);
-                    return false;
-                }
-
                 lock (Sync)
                 {
                     if (!force && LastCapture.TryGetValue(fresh.InternalId, out var last) &&
@@ -109,7 +102,18 @@ namespace StrmAssistant.MediaEnhance
                     }
                 }
 
-                var streams = fresh.GetMediaStreams()?.Where(stream => stream != null).ToList() ?? new List<MediaStream>();
+                var targetFingerprint = ComputeShortcutTargetFingerprint(fresh);
+                if (string.IsNullOrWhiteSpace(targetFingerprint))
+                {
+                    Increment(status => status.CapturesSkipped++);
+                    return false;
+                }
+
+                // The shadow is for playback-critical internal streams only. External subtitle/audio
+                // paths may contain private mount paths or signed URLs and are intentionally excluded.
+                var streams = fresh.GetMediaStreams()?
+                                  .Where(stream => stream != null && !stream.IsExternal)
+                                  .ToList() ?? new List<MediaStream>();
                 if (!HasExpectedCoreStream(fresh, streams)) return false;
 
                 var record = new MediaInfoReliabilityShadowRecord
@@ -184,7 +188,17 @@ namespace StrmAssistant.MediaEnhance
                     File.Copy(backup, path, true);
                 }
 
-                repository.SaveMediaStreams(fresh.InternalId, record.MediaStreams, CancellationToken.None);
+                // Preserve sidecars that Emby currently knows about while restoring only the lost
+                // internal streams from the shadow. This avoids shadow restore deleting subtitles.
+                var currentExternal = fresh.GetMediaStreams()?
+                                           .Where(stream => stream != null && stream.IsExternal)
+                                           .ToList() ?? new List<MediaStream>();
+                var mergedStreams = record.MediaStreams
+                    .Where(stream => stream != null && !stream.IsExternal)
+                    .Concat(currentExternal)
+                    .ToList();
+
+                repository.SaveMediaStreams(fresh.InternalId, mergedStreams, CancellationToken.None);
                 fresh.RunTimeTicks = record.RunTimeTicks;
                 fresh.Size = record.Size;
                 fresh.Container = record.Container;
@@ -248,6 +262,7 @@ namespace StrmAssistant.MediaEnhance
                     .GetAwaiter().GetResult();
                 if (record == null || record.SchemaVersion != 2 ||
                     record.RunTimeTicks.GetValueOrDefault() <= 0 || record.MediaStreams == null ||
+                    record.MediaStreams.Any(stream => stream?.IsExternal == true) ||
                     !HasExpectedCoreStream(item, record.MediaStreams))
                 {
                     record = null;
