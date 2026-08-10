@@ -17,8 +17,9 @@ using System.Threading.Tasks;
 namespace StrmAssistant.MediaEnhance
 {
     /// <summary>
-    /// Repairs persisted MediaInfo after provider refreshes that leave runtime/streams incomplete.
-    /// Recovery reads only a validated local JSON/.bak snapshot and never invokes ffprobe.
+    /// Repairs MediaInfo after provider refreshes that leave runtime/streams incomplete. Two local
+    /// sources are supported: the user's optional persisted MediaInfo JSON/.bak and the plugin-owned
+    /// STRM reliability shadow store. Neither recovery path invokes ffprobe or the remote media URL.
     /// </summary>
     public sealed class MediaInfoIntegrityMonitor : IServerEntryPoint
     {
@@ -48,6 +49,17 @@ namespace StrmAssistant.MediaEnhance
         private async void OnRefreshCompleted(object sender, GenericEventArgs<RefreshProgressInfo> e)
         {
             var item = e?.Argument?.Item;
+            if (item == null) return;
+
+            // A successful refresh is the safest moment to refresh the independent STRM shadow.
+            // This works even when the user intentionally leaves PersistMediaInfoMode=None.
+            if (MediaInfoReliabilityShadowStore.AppliesTo(item) &&
+                MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
+            {
+                MediaInfoReliabilityShadowStore.Capture(item);
+                return;
+            }
+
             if (!ShouldRecover(item)) return;
             if (!_inFlight.TryAdd(item.InternalId, 0)) return;
 
@@ -70,11 +82,15 @@ namespace StrmAssistant.MediaEnhance
         {
             if (item == null || Plugin.Instance == null || Plugin.LibraryApi == null || Plugin.MediaInfoApi == null)
                 return false;
+            if (MediaInfoIntegrityService.IsCoreMediaInfoComplete(item)) return false;
+
+            if (MediaInfoReliabilityShadowStore.AppliesTo(item) &&
+                MediaInfoReliabilityShadowStore.Exists(item))
+                return true;
 
             var options = Plugin.Instance.GetPluginOptions()?.MediaInfoExtractOptions;
-            if (!PersistenceEnabledFor(item, options)) return false;
-            if (!Plugin.LibraryApi.IsLibraryInScope(item)) return false;
-            return !MediaInfoIntegrityService.IsCoreMediaInfoComplete(item) &&
+            return PersistenceEnabledFor(item, options) &&
+                   Plugin.LibraryApi.IsLibraryInScope(item) &&
                    MediaInfoIntegrityService.SnapshotExists(item);
         }
 
@@ -90,7 +106,7 @@ namespace StrmAssistant.MediaEnhance
 
         internal static bool SnapshotExists(BaseItem item)
         {
-            return MediaInfoIntegrityService.SnapshotExists(item);
+            return MediaInfoIntegrityService.SnapshotExists(item) || MediaInfoReliabilityShadowStore.Exists(item);
         }
 
         internal static Task<bool> RecoverAsync(BaseItem item, string source, CancellationToken cancellationToken)
@@ -98,7 +114,19 @@ namespace StrmAssistant.MediaEnhance
             cancellationToken.ThrowIfCancellationRequested();
             if (item == null || MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
                 return Task.FromResult(true);
-            return Task.FromResult(MediaInfoIntegrityService.HydrateCore(item, source));
+
+            var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
+            var canUsePersisted = PersistenceEnabledFor(item, options) &&
+                                  Plugin.LibraryApi?.IsLibraryInScope(item) == true &&
+                                  MediaInfoIntegrityService.SnapshotExists(item);
+            if (canUsePersisted && MediaInfoIntegrityService.HydrateCore(item, source + " Persisted"))
+            {
+                var fresh = Plugin.Instance.ApplicationHost.Resolve<ILibraryManager>()?.GetItemById(item.InternalId) ?? item;
+                MediaInfoReliabilityShadowStore.Capture(fresh, true);
+                return Task.FromResult(true);
+            }
+
+            return Task.FromResult(MediaInfoReliabilityShadowStore.Restore(item, source + " Shadow"));
         }
     }
 
@@ -122,23 +150,16 @@ namespace StrmAssistant.MediaEnhance
                 return;
 
             var options = Plugin.Instance.GetPluginOptions()?.MediaInfoExtractOptions;
-            if (options == null ||
-                options.PersistMediaInfoMode == MediaInfoExtractOptions.PersistMediaInfoOption.None.ToString())
-                return;
-
             var items = _libraryManager.GetItemList(new InternalItemsQuery
             {
                 HasPath = true,
-                MediaTypes = options.PersistMusicMediaInfo
+                MediaTypes = options?.PersistMusicMediaInfo == true
                     ? new[] { MediaType.Video, MediaType.Audio }
                     : new[] { MediaType.Video }
             }) ?? Array.Empty<BaseItem>();
 
             var candidates = items
-                .Where(item => MediaInfoIntegrityMonitor.PersistenceEnabledFor(item, options))
-                .Where(item => Plugin.LibraryApi.IsLibraryInScope(item))
-                .Where(item => !MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
-                .Where(MediaInfoIntegrityService.SnapshotExists)
+                .Where(ShouldRecover)
                 .GroupBy(item => item.InternalId)
                 .Select(group => group.First())
                 .ToList();
