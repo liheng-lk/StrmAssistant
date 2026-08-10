@@ -1,3 +1,4 @@
+using StrmAssistant.Options;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -47,7 +48,28 @@ namespace StrmAssistant.Experience
         public static RemoteDeepDeleteOptions GetSnapshot()
         {
             EnsureLoaded();
-            lock (Sync) return Clone(_options);
+            lock (Sync)
+            {
+                var result = Clone(_options);
+                var ui = Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions;
+                if (HasUiConfiguration(ui))
+                {
+                    result.Enabled = ui.EnableRemoteDeepDelete;
+                    if (!Enum.TryParse(ui.RemoteDeepDeleteProvider.ToString(), true,
+                            out RemoteDeepDeleteProviderType provider))
+                        provider = RemoteDeepDeleteProviderType.None;
+                    result.Provider = provider;
+                    result.BaseUrl = ui.RemoteDeepDeleteBaseUrl;
+                    result.AccessToken = ui.RemoteDeepDeleteAccessToken;
+                    result.Username = ui.RemoteDeepDeleteUsername;
+                    result.Password = ui.RemoteDeepDeletePassword;
+                    result.PathMappings = ui.RemoteDeepDeletePathMappings;
+                    result.AllowedRemoteRoots = ui.RemoteDeepDeleteAllowedRoots;
+                    result.TimeoutSeconds = ui.RemoteDeepDeleteTimeoutSeconds;
+                    result.TreatNotFoundAsSuccess = ui.RemoteDeepDeleteTreatNotFoundAsSuccess;
+                }
+                return Sanitize(result);
+            }
         }
 
         public static RemoteDeepDeleteOptions Save(RemoteDeepDeleteOptions value)
@@ -73,7 +95,7 @@ namespace StrmAssistant.Experience
                     "TimeoutSeconds=" + _options.TimeoutSeconds,
                     "TreatNotFoundAsSuccess=" + _options.TreatNotFoundAsSuccess
                 });
-                return Clone(_options);
+                return GetSnapshot();
             }
         }
 
@@ -135,6 +157,19 @@ namespace StrmAssistant.Experience
             if (normalized == null) return false;
             return roots.Any(root => string.Equals(normalized, root, StringComparison.Ordinal) ||
                                      normalized.StartsWith(root.TrimEnd('/') + "/", StringComparison.Ordinal));
+        }
+
+        private static bool HasUiConfiguration(ExperienceEnhanceOptions ui)
+        {
+            if (ui == null) return false;
+            return ui.EnableRemoteDeepDelete ||
+                   ui.RemoteDeepDeleteProvider != ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.None ||
+                   !string.IsNullOrWhiteSpace(ui.RemoteDeepDeleteBaseUrl) ||
+                   !string.IsNullOrWhiteSpace(ui.RemoteDeepDeleteAccessToken) ||
+                   !string.IsNullOrWhiteSpace(ui.RemoteDeepDeleteUsername) ||
+                   !string.IsNullOrEmpty(ui.RemoteDeepDeletePassword) ||
+                   !string.IsNullOrWhiteSpace(ui.RemoteDeepDeletePathMappings) ||
+                   !string.IsNullOrWhiteSpace(ui.RemoteDeepDeleteAllowedRoots);
         }
 
         private static void EnsureLoaded()
