@@ -128,6 +128,29 @@ namespace StrmAssistant.Compatibility
             }
         }
 
+        /// <summary>
+        /// Queue a STRM item for shadow capture. Multiple writes for the same item collapse into one
+        /// delayed capture, so library refresh/database update paths never perform JSON/file I/O inline.
+        /// </summary>
+        public static void QueueCapture(long itemId)
+        {
+            if (itemId <= 0) return;
+
+            var now = DateTimeOffset.UtcNow;
+            var isNew = Pending.TryAdd(itemId, now);
+            if (!isNew)
+            {
+                Pending[itemId] = now;
+            }
+            else
+            {
+                Interlocked.Increment(ref _pendingCount);
+                MediaInfoReliabilityShadowRuntimeState.Status.DeferredCapturesScheduled++;
+            }
+
+            MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = Volatile.Read(ref _pendingCount);
+        }
+
         public static void SaveMediaStreamsPostfix(object[] __args)
         {
             if (__args == null) return;
@@ -139,18 +162,7 @@ namespace StrmAssistant.Compatibility
                 var libraryManager = Plugin.Instance?.ApplicationHost?.Resolve<ILibraryManager>();
                 var item = libraryManager?.GetItemById(itemId);
                 if (!MediaInfoReliabilityShadowStore.AppliesTo(item)) return;
-
-                var isNew = Pending.TryAdd(itemId, DateTimeOffset.UtcNow);
-                if (!isNew)
-                {
-                    Pending[itemId] = DateTimeOffset.UtcNow;
-                }
-                else
-                {
-                    Interlocked.Increment(ref _pendingCount);
-                    MediaInfoReliabilityShadowRuntimeState.Status.DeferredCapturesScheduled++;
-                }
-                MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = Volatile.Read(ref _pendingCount);
+                QueueCapture(itemId);
             }
             catch (Exception ex)
             {
