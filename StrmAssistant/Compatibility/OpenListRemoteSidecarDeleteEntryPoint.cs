@@ -28,14 +28,6 @@ namespace StrmAssistant.Compatibility
             new OpenListRemoteSidecarDeleteStatus();
     }
 
-    /// <summary>
-    /// Optional transaction extension for OpenList remote deep delete.
-    ///
-    /// The sidecar directory listing is frozen in a prefix before the main destructive request. If the
-    /// listing is unreadable/truncated/unsafe, the main remote file is not touched. After the main file
-    /// is verified missing, only candidates from that frozen conservative plan are removed and verified.
-    /// Local STRM/Emby deletion remains blocked until both stages complete.
-    /// </summary>
     public sealed class OpenListRemoteSidecarDeleteEntryPoint : IServerEntryPoint
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.openlist-remote-sidecars";
@@ -82,12 +74,7 @@ namespace StrmAssistant.Compatibility
         private static readonly OpenListRemoteSidecarService Service = new OpenListRemoteSidecarService();
         private static readonly object StatusSync = new object();
 
-        /// <summary>
-        /// Freeze the candidate set before the main file is deleted. This intentionally blocks the
-        /// delete call for one bounded OpenList directory-list request; deep delete is rare/destructive,
-        /// and avoiding an irreversible partial state is more important than request-thread throughput.
-        /// </summary>
-        public static bool Prefix(RemoteDeepDeletePlan plan,
+        public static bool Prefix(RemoteDeepDeletePlan plan, CancellationToken cancellationToken,
             ref Task<RemoteDeepDeleteExecutionResult> __result,
             out OpenListRemoteSidecarPlan __state)
         {
@@ -104,7 +91,8 @@ namespace StrmAssistant.Compatibility
 
             try
             {
-                var frozen = Service.PlanAsync(plan, CancellationToken.None).GetAwaiter().GetResult();
+                cancellationToken.ThrowIfCancellationRequested();
+                var frozen = Service.PlanAsync(plan, cancellationToken).GetAwaiter().GetResult();
                 if (frozen?.Success != true)
                 {
                     var error = frozen?.Error ?? "OpenList sidecar preflight did not return a valid plan.";
@@ -133,6 +121,24 @@ namespace StrmAssistant.Compatibility
                 });
                 return true;
             }
+            catch (OperationCanceledException)
+            {
+                const string error = "Associated sidecar preflight was cancelled before the main remote object was touched.";
+                Increment(status =>
+                {
+                    status.PreflightBlocked++;
+                    status.SidecarTransactionsFailed++;
+                    status.LastError = error;
+                });
+                __result = Task.FromResult(new RemoteDeepDeleteExecutionResult
+                {
+                    Success = false,
+                    Provider = plan?.Provider,
+                    RemotePath = plan?.RemotePath,
+                    Error = error
+                });
+                return false;
+            }
             catch (Exception ex)
             {
                 var error = ex.GetBaseException().Message;
@@ -153,15 +159,16 @@ namespace StrmAssistant.Compatibility
             }
         }
 
-        public static void Postfix(RemoteDeepDeletePlan plan, OpenListRemoteSidecarPlan __state,
-            ref Task<RemoteDeepDeleteExecutionResult> __result)
+        public static void Postfix(RemoteDeepDeletePlan plan, CancellationToken cancellationToken,
+            OpenListRemoteSidecarPlan __state, ref Task<RemoteDeepDeleteExecutionResult> __result)
         {
             if (__result == null || plan == null || __state == null) return;
-            __result = CompleteSidecarsAsync(plan, __state, __result);
+            __result = CompleteSidecarsAsync(plan, __state, __result, cancellationToken);
         }
 
         private static async Task<RemoteDeepDeleteExecutionResult> CompleteSidecarsAsync(RemoteDeepDeletePlan plan,
-            OpenListRemoteSidecarPlan frozenPlan, Task<RemoteDeepDeleteExecutionResult> original)
+            OpenListRemoteSidecarPlan frozenPlan, Task<RemoteDeepDeleteExecutionResult> original,
+            CancellationToken cancellationToken)
         {
             var main = await original.ConfigureAwait(false);
             if (main?.Success != true) return main;
@@ -178,7 +185,8 @@ namespace StrmAssistant.Compatibility
 
             try
             {
-                var sidecars = await Service.DeleteAndVerifyAsync(plan, frozenPlan, CancellationToken.None)
+                cancellationToken.ThrowIfCancellationRequested();
+                var sidecars = await Service.DeleteAndVerifyAsync(plan, frozenPlan, cancellationToken)
                     .ConfigureAwait(false);
                 if (sidecars.Success)
                 {
@@ -203,6 +211,18 @@ namespace StrmAssistant.Compatibility
                              "local deletion was blocked. Retry is safe because sidecar mode requires missing main targets to be idempotent: " +
                              sidecars.Error;
                 Plugin.Instance?.Logger?.Warn(main.Error);
+                return main;
+            }
+            catch (OperationCanceledException)
+            {
+                const string error = "Main remote target is verified deleted, but associated sidecar cleanup was cancelled; local deletion remains blocked.";
+                Increment(status =>
+                {
+                    status.SidecarTransactionsFailed++;
+                    status.LastError = error;
+                });
+                main.Success = false;
+                main.Error = error;
                 return main;
             }
             catch (Exception ex)
