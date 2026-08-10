@@ -61,6 +61,29 @@ namespace StrmAssistant.Options
             {
                 context.AddValidationError(Resources.InvalidFingerprintCatchup);
             }
+
+            var experience = ExperienceEnhanceOptions;
+            if (experience?.EnableRemoteDeepDelete == true)
+            {
+                if (!experience.EnableDeepDelete)
+                    context.AddValidationError("启用远程/网盘深度删除前必须先启用“深度删除”总开关。");
+
+                if (experience.RemoteDeepDeleteProvider ==
+                    ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.None)
+                    context.AddValidationError("远程/网盘深度删除必须选择 OpenList 或 WebDav 提供方。");
+
+                if (!Uri.TryCreate(experience.RemoteDeepDeleteBaseUrl, UriKind.Absolute, out var remoteUri) ||
+                    (remoteUri.Scheme != Uri.UriSchemeHttp && remoteUri.Scheme != Uri.UriSchemeHttps))
+                    context.AddValidationError("远程删除 Base URL 必须是有效的 HTTP/HTTPS 绝对地址。");
+
+                if (string.IsNullOrWhiteSpace(experience.RemoteDeepDeleteAllowedRoots))
+                    context.AddValidationError("远程/网盘深度删除必须至少配置一个“允许删除的远端根目录”。");
+
+                if (experience.RemoteDeepDeleteProvider ==
+                        ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.OpenList &&
+                    string.IsNullOrWhiteSpace(experience.RemoteDeepDeleteAccessToken))
+                    context.AddValidationError("OpenList 远程删除需要 Access Token。");
+            }
         }
     }
 }
