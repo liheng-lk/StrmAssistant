@@ -62,29 +62,92 @@ namespace StrmAssistant.Options
         public bool EnableDeepDelete { get; set; } = false;
 
         [DisplayName("深度删除预演模式 (Dry Run)")]
-        [Description("开启时只生成并记录删除计划，不实际删除任何文件。建议首次配置时保持开启。")]
+        [Description("开启时只生成并记录删除计划，不实际删除任何文件或网盘对象。首次配置远端删除时建议先保持开启。")]
         [VisibleCondition(nameof(EnableDeepDelete), SimpleCondition.IsTrue)]
         public bool DeepDeleteDryRun { get; set; } = true;
 
-        [DisplayName("允许删除的根目录")]
-        [Description("每行填写一个允许删除的本地根目录。目标文件不在这些目录内时会被拒绝。留空时禁止删除 STRM 指向的目标文件。")]
+        [DisplayName("允许删除的本地根目录")]
+        [Description("每行填写一个允许删除的本地根目录。目标文件不在这些目录内时会被拒绝。留空时禁止删除 STRM 指向的本地目标文件。")]
+        [EditMultiline(4)]
         [VisibleCondition(nameof(EnableDeepDelete), SimpleCondition.IsTrue)]
         public string DeepDeleteAllowedRoots { get; set; } = string.Empty;
 
         [DisplayName("删除 STRM 指向的本地目标文件")]
-        [Description("仅对本地绝对路径或 file:// 路径生效；HTTP/HTTPS 等远程地址永远不会删除。")]
+        [Description("仅用于本地绝对路径或 file:// 路径。HTTP/HTTPS 网盘地址由下面的“远程/网盘深度删除”单独处理。")]
         [VisibleCondition(nameof(EnableDeepDelete), SimpleCondition.IsTrue)]
         public bool DeepDeleteTargetFile { get; set; } = false;
 
         [DisplayName("删除关联文件")]
-        [Description("删除与目标媒体文件同名前缀的 NFO、JSON、图片、字幕等关联文件。")]
+        [Description("删除与本地目标媒体文件同名前缀的 NFO、JSON、图片、字幕等关联文件。")]
         [VisibleCondition(nameof(EnableDeepDelete), SimpleCondition.IsTrue)]
         public bool DeepDeleteAssociatedFiles { get; set; } = true;
 
         [DisplayName("清理空目录")]
-        [Description("删除完成后清理允许根目录内的空目录；不会删除允许根目录本身。默认关闭。")]
+        [Description("本地删除完成后清理允许根目录内的空目录；不会删除允许根目录本身。默认关闭。")]
         [VisibleCondition(nameof(EnableDeepDelete), SimpleCondition.IsTrue)]
         public bool DeepDeleteEmptyDirectories { get; set; } = false;
+
+        public enum RemoteDeepDeleteProviderOption
+        {
+            None,
+            OpenList,
+            WebDav
+        }
+
+        [DisplayName("远程/网盘深度删除")]
+        [Description("让深度删除同时删除 STRM 指向的 OpenList/AList 或 WebDAV 对象。远端删除只有在路径映射、允许根目录、权限和删除后验证全部通过时才会继续删除本地 STRM/Emby 项目；失败时保持本地项目不动。")]
+        [Required]
+        [VisibleCondition(nameof(EnableDeepDelete), SimpleCondition.IsTrue)]
+        public bool EnableRemoteDeepDelete { get; set; } = false;
+
+        [DisplayName("远程删除提供方")]
+        [Description("OpenList 通过 /api/fs/remove 删除并用 /api/fs/get 验证；WebDav 使用 DELETE 并通过 HEAD/PROPFIND 验证。")]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public RemoteDeepDeleteProviderOption RemoteDeepDeleteProvider { get; set; } = RemoteDeepDeleteProviderOption.None;
+
+        [DisplayName("远程服务 Base URL")]
+        [Description("例如 https://alist.example.com 或 WebDAV 根地址。不要包含具体媒体路径。")]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public string RemoteDeepDeleteBaseUrl { get; set; } = string.Empty;
+
+        [DisplayName("OpenList Access Token")]
+        [Description("仅 OpenList 使用。填写 OpenList API 所需的 Authorization 值；不会在诊断接口中回显明文。")]
+        [IsPassword]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public string RemoteDeepDeleteAccessToken { get; set; } = string.Empty;
+
+        [DisplayName("WebDAV 用户名")]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public string RemoteDeepDeleteUsername { get; set; } = string.Empty;
+
+        [DisplayName("WebDAV 密码")]
+        [IsPassword]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public string RemoteDeepDeletePassword { get; set; } = string.Empty;
+
+        [DisplayName("远端路径映射")]
+        [Description("每行：STRM 地址前缀 => 网盘内部路径根。例如 https://alist.example.com/d/115 => /115。最长前缀优先。OpenList 同源 /d/ 直链也支持安全自动映射，但显式映射优先。")]
+        [EditMultiline(6)]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public string RemoteDeepDeletePathMappings { get; set; } = string.Empty;
+
+        [DisplayName("允许删除的远端根目录")]
+        [Description("每行一个 OpenList/WebDAV 内部路径，例如 /115/影视。只有该目录及其子目录允许执行远端删除；留空时远端破坏性操作一律阻止。")]
+        [EditMultiline(5)]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public string RemoteDeepDeleteAllowedRoots { get; set; } = string.Empty;
+
+        [DisplayName("远端删除超时（秒）")]
+        [MinValue(5), MaxValue(120)]
+        [Required]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public int RemoteDeepDeleteTimeoutSeconds { get; set; } = 30;
+
+        [DisplayName("远端对象已不存在时视为成功")]
+        [Description("建议开启。删除前对象已经不存在或删除后验证返回 404/410 时，允许继续清理本地 STRM/Emby 项目。")]
+        [Required]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public bool RemoteDeepDeleteTreatNotFoundAsSuccess { get; set; } = true;
 
         [DisplayName("隐藏合集媒体库")]
         [Description("将 Emby 的 BoxSets/合集顶级媒体库加入所有用户的 MyMediaExcludes，仅从用户界面隐藏，不删除合集和刮削配置。关闭后只撤销由本插件添加的隐藏项。")]
