@@ -32,7 +32,7 @@ namespace StrmAssistant.Compatibility
             new NativeRemoteDeleteTransactionStatus();
     }
 
-    internal sealed class NativeRemoteDeleteCallState
+    public sealed class NativeRemoteDeleteCallState
     {
         public long ItemInternalId { get; set; }
         public string ItemPath { get; set; }
