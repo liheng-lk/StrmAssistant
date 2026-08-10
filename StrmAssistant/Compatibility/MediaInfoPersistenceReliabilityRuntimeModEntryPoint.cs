@@ -1,6 +1,7 @@
 using HarmonyLib;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Plugins;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
 using StrmAssistant.Api;
 using StrmAssistant.Common;
@@ -36,11 +37,6 @@ namespace StrmAssistant.Compatibility
             new MediaInfoPersistenceReliabilityStatus();
     }
 
-    /// <summary>
-    /// Reliability layer for persisted MediaInfo. Backups are promoted only after the actual JSON
-    /// payload has been deserialized and validated; an empty/corrupt primary can therefore never
-    /// overwrite the last known-good .bak snapshot.
-    /// </summary>
     public sealed class MediaInfoPersistenceReliabilityRuntimeModEntryPoint : IServerEntryPoint
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.mediainfo-reliability";
