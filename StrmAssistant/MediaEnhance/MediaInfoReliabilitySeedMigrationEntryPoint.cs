@@ -1,7 +1,11 @@
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Querying;
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +20,9 @@ namespace StrmAssistant.MediaEnhance
         public bool Started { get; set; }
         public bool Completed { get; set; }
         public bool Cancelled { get; set; }
+        public int CompleteStrmCount { get; set; }
+        public int ProtectedStrmCount { get; set; }
+        public int MissingShadowCount { get; set; }
         public string StartedUtc { get; set; }
         public string CompletedUtc { get; set; }
         public string Error { get; set; }
@@ -30,8 +37,8 @@ namespace StrmAssistant.MediaEnhance
     /// <summary>
     /// One-time schema migration for installations that already have complete STRM MediaInfo in Emby's
     /// local repository. It invokes the existing reliability seed task only after startup settles and
-    /// never probes the STRM target. The v3 marker is intentionally new because v3 changed target
-    /// identity to ignore expiring URL query/fragment tokens.
+    /// never probes the STRM target. The v3 marker is written only after every currently complete STRM
+    /// has a valid v3 shadow; partial filesystem failures therefore retry on a future startup.
     /// </summary>
     public sealed class MediaInfoReliabilitySeedMigrationEntryPoint : IServerEntryPoint
     {
@@ -75,8 +82,6 @@ namespace StrmAssistant.MediaEnhance
                 status.Started = true;
                 status.StartedUtc = DateTimeOffset.UtcNow.ToString("O");
 
-                // Do not compete with Emby's initial startup/scan. IsScanRunning is read by reflection so
-                // this migration does not add a compile-time dependency on a version-specific member.
                 await Task.Delay(TimeSpan.FromSeconds(45), cancellationToken).ConfigureAwait(false);
                 for (var attempt = 0; attempt < 60 && IsLibraryScanRunning(); attempt++)
                     await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
@@ -86,29 +91,50 @@ namespace StrmAssistant.MediaEnhance
                 await task.Execute(cancellationToken, null).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
 
+                var completeStrms = (_libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    HasPath = true,
+                    MediaTypes = new[] { MediaType.Video, MediaType.Audio }
+                }) ?? Array.Empty<BaseItem>())
+                    .Where(MediaInfoReliabilityShadowStore.AppliesTo)
+                    .Where(MediaInfoIntegrityService.IsCoreMediaInfoComplete)
+                    .GroupBy(item => item.InternalId)
+                    .Select(group => group.First())
+                    .ToList();
+
+                status.CompleteStrmCount = completeStrms.Count;
+                status.ProtectedStrmCount = completeStrms.Count(MediaInfoReliabilityShadowStore.Exists);
+                status.MissingShadowCount = status.CompleteStrmCount - status.ProtectedStrmCount;
+                if (status.MissingShadowCount > 0)
+                {
+                    throw new InvalidDataException(
+                        "Schema-v3 shadow verification failed for " + status.MissingShadowCount +
+                        " of " + status.CompleteStrmCount + " complete STRM items; no migration marker was written.");
+                }
+
                 var parent = Path.GetDirectoryName(marker);
                 if (!string.IsNullOrWhiteSpace(parent)) Directory.CreateDirectory(parent);
                 File.WriteAllText(marker,
                     "schema=" + ShadowSchemaVersion + Environment.NewLine +
                     "completedUtc=" + DateTimeOffset.UtcNow.ToString("O") + Environment.NewLine +
+                    "completeStrms=" + status.CompleteStrmCount + Environment.NewLine +
+                    "protectedStrms=" + status.ProtectedStrmCount + Environment.NewLine +
                     "identity=http(s)-authority-and-decoded-path-without-query-or-fragment" + Environment.NewLine);
 
                 status.Completed = true;
                 status.CompletedUtc = DateTimeOffset.UtcNow.ToString("O");
                 status.Error = null;
                 Plugin.Instance?.Logger?.Info(
-                    "STRM MediaInfo reliability schema-v{0} startup seed completed; marker={1}",
-                    ShadowSchemaVersion, marker);
+                    "STRM MediaInfo reliability schema-v{0} startup seed verified: protected={1}/{2}; marker={3}",
+                    ShadowSchemaVersion, status.ProtectedStrmCount, status.CompleteStrmCount, marker);
             }
             catch (OperationCanceledException)
             {
                 status.Cancelled = true;
-                // No marker: a future startup retries.
             }
             catch (Exception ex)
             {
                 status.Error = ex.GetBaseException().Message;
-                // No marker: a future startup retries.
                 Plugin.Instance?.Logger?.Warn("STRM MediaInfo reliability startup migration failed: " + status.Error);
             }
         }
