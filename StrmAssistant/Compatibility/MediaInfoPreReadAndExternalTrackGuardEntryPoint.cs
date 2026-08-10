@@ -23,6 +23,7 @@ namespace StrmAssistant.Compatibility
         public long PreReadRestoreSucceeded { get; set; }
         public long PreReadRestoreFailed { get; set; }
         public long ShadowCaptures { get; set; }
+        public long ShadowCaptureQueued { get; set; }
         public long ShadowRestores { get; set; }
         public long ExternalTrackWritesBlocked { get; set; }
         public long ExternalTrackBaselineRecovered { get; set; }
@@ -40,7 +41,7 @@ namespace StrmAssistant.Compatibility
     /// <summary>
     /// Restores validated persisted/shadow core MediaInfo before playback/static media-source reads
     /// and protects internal A/V streams from being replaced by an external-track-only refresh.
-    /// No media probe is executed by this guard.
+    /// No media probe is executed by this guard and complete-item playback paths never write shadow files inline.
     /// </summary>
     public sealed class MediaInfoPreReadAndExternalTrackGuardEntryPoint : IServerEntryPoint
     {
@@ -130,13 +131,15 @@ namespace StrmAssistant.Compatibility
             var itemIndex = FindItem(__args, out var item);
             if (item == null) return;
 
-            // Seed the plugin-owned STRM shadow opportunistically from already-complete DB state.
-            // The store throttles writes, so this does not write on every playback call.
+            // Complete playback requests must stay on the fast path. Shadow persistence is queued and
+            // performed by the bounded background writer instead of reading/writing the STRM shadow inline.
             if (MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
             {
-                if (MediaInfoReliabilityShadowStore.AppliesTo(item) &&
-                    MediaInfoReliabilityShadowStore.Capture(item))
-                    Increment(status => status.ShadowCaptures++);
+                if (MediaInfoReliabilityShadowStore.AppliesTo(item))
+                {
+                    MediaInfoReliabilityShadowPatches.QueueCapture(item.InternalId);
+                    Increment(status => status.ShadowCaptureQueued++);
+                }
                 return;
             }
 
@@ -219,7 +222,10 @@ namespace StrmAssistant.Compatibility
 
             if (MediaInfoReliabilityShadowStore.AppliesTo(fresh) &&
                 MediaInfoIntegrityService.IsCoreMediaInfoComplete(fresh))
-                MediaInfoReliabilityShadowStore.Capture(fresh);
+            {
+                MediaInfoReliabilityShadowPatches.QueueCapture(fresh.InternalId);
+                Increment(status => status.ShadowCaptureQueued++);
+            }
 
             __state.ItemId = fresh.InternalId;
             __state.BaselineInternalAvCount = internalCount;
@@ -242,7 +248,8 @@ namespace StrmAssistant.Compatibility
             var current = SafeStreams(fresh);
             if (CountInternalAv(current) > 0)
             {
-                MediaInfoReliabilityShadowStore.Capture(fresh, true);
+                MediaInfoReliabilityShadowPatches.QueueCapture(fresh.InternalId);
+                Increment(status => status.ShadowCaptureQueued++);
                 return;
             }
 
@@ -269,7 +276,9 @@ namespace StrmAssistant.Compatibility
                     await Plugin.MediaInfoApi.SerializeMediaInfo(state.ItemId, directoryService, true,
                         "ExternalTrack Guard Repair").ConfigureAwait(false);
                 }
-                MediaInfoReliabilityShadowStore.Capture(ResolveItem(state.ItemId) ?? refreshed, true);
+
+                MediaInfoReliabilityShadowPatches.QueueCapture((ResolveItem(state.ItemId) ?? refreshed).InternalId);
+                Increment(status => status.ShadowCaptureQueued++);
             }
             catch (Exception ex)
             {
