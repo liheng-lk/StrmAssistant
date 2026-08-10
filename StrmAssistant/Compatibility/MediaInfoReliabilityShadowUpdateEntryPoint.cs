@@ -5,7 +5,6 @@ using MediaBrowser.Controller.Plugins;
 using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 
@@ -15,6 +14,7 @@ namespace StrmAssistant.Compatibility
     {
         public int UpdateItemsTargetsPatched { get; set; }
         public long CompleteStrmItemsObserved { get; set; }
+        public long CompleteStrmItemsQueued { get; set; }
         public string LastError { get; set; }
         public string Error { get; set; }
     }
@@ -96,8 +96,10 @@ namespace StrmAssistant.Compatibility
                         if (!(value is BaseItem item)) continue;
                         if (!MediaInfoReliabilityShadowStore.AppliesTo(item) ||
                             !MediaInfoIntegrityService.IsCoreMediaInfoComplete(item)) continue;
+
                         MediaInfoReliabilityShadowUpdateState.Status.CompleteStrmItemsObserved++;
-                        MediaInfoReliabilityShadowStore.Capture(item);
+                        MediaInfoReliabilityShadowPatches.QueueCapture(item.InternalId);
+                        MediaInfoReliabilityShadowUpdateState.Status.CompleteStrmItemsQueued++;
                     }
                 }
                 catch (Exception ex)
