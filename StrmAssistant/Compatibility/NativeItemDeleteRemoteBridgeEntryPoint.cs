@@ -4,6 +4,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Services;
+using StrmAssistant.Common;
 using StrmAssistant.Experience;
 using System;
 using System.Collections.Generic;
@@ -200,12 +201,8 @@ namespace StrmAssistant.Compatibility
             var plan = RemoteService.BuildPlan(item);
             if (!plan.Applicable)
             {
-                // If a remote HTTP(S) STRM target was resolved but configuration could not map/allow it, fail closed.
-                // Otherwise this is a normal local-delete item and Emby's original path remains untouched.
                 if (LooksLikeRemoteTarget(plan?.SourceTarget))
-                {
                     Block(plan, plan?.Error ?? "Remote STRM target could not be mapped safely.");
-                }
                 return;
             }
 
