@@ -149,6 +149,11 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
         public bool RemoteDeepDeleteTreatNotFoundAsSuccess { get; set; } = true;
 
+        [DisplayName("删除 OpenList 远端关联文件")]
+        [Description("默认关闭。启用后，深度删除会先读取主媒体所在 OpenList 目录并冻结安全计划，仅选择与主文件同 stem 的 NFO、JSON/XML、字幕和图片；主文件及这些关联文件全部删除并验证成功后，才删除本地 STRM/Emby 项目。为保证半完成事务可以安全重试，必须同时开启“远端对象已不存在时视为成功”。")]
+        [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
+        public bool RemoteDeepDeleteAssociatedFiles { get; set; } = false;
+
         [DisplayName("隐藏合集媒体库")]
         [Description("将 Emby 的 BoxSets/合集顶级媒体库加入所有用户的 MyMediaExcludes，仅从用户界面隐藏，不删除合集和刮削配置。关闭后只撤销由本插件添加的隐藏项。")]
         [Required]
