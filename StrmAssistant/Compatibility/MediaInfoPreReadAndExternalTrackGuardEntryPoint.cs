@@ -22,6 +22,8 @@ namespace StrmAssistant.Compatibility
         public long PreReadRestoreAttempts { get; set; }
         public long PreReadRestoreSucceeded { get; set; }
         public long PreReadRestoreFailed { get; set; }
+        public long ShadowCaptures { get; set; }
+        public long ShadowRestores { get; set; }
         public long ExternalTrackWritesBlocked { get; set; }
         public long ExternalTrackBaselineRecovered { get; set; }
         public long ExternalTrackPostWriteRepairs { get; set; }
@@ -36,8 +38,8 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// Restores validated persisted core MediaInfo before playback/static media-source reads and
-    /// protects internal A/V streams from being replaced by an external-track-only refresh.
+    /// Restores validated persisted/shadow core MediaInfo before playback/static media-source reads
+    /// and protects internal A/V streams from being replaced by an external-track-only refresh.
     /// No media probe is executed by this guard.
     /// </summary>
     public sealed class MediaInfoPreReadAndExternalTrackGuardEntryPoint : IServerEntryPoint
@@ -126,20 +128,35 @@ namespace StrmAssistant.Compatibility
         {
             if (RecoveryDepth.Value > 0 || __args == null) return;
             var itemIndex = FindItem(__args, out var item);
-            if (item == null || MediaInfoIntegrityService.IsCoreMediaInfoComplete(item)) return;
-            if (!MediaInfoIntegrityService.SnapshotExists(item)) return;
-            if (!MediaInfoIntegrityMonitor.PersistenceEnabledFor(item,
-                    Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions)) return;
-            if (Plugin.LibraryApi?.IsLibraryInScope(item) != true) return;
+            if (item == null) return;
+
+            // Seed the plugin-owned STRM shadow opportunistically from already-complete DB state.
+            // The store throttles writes, so this does not write on every playback call.
+            if (MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
+            {
+                if (MediaInfoReliabilityShadowStore.AppliesTo(item) &&
+                    MediaInfoReliabilityShadowStore.Capture(item))
+                    Increment(status => status.ShadowCaptures++);
+                return;
+            }
+
+            if (!MediaInfoIntegrityMonitor.ShouldRecover(item)) return;
 
             Increment(status => status.PreReadRestoreAttempts++);
             SetLastItem(item.Path);
             try
             {
                 RecoveryDepth.Value++;
-                if (MediaInfoIntegrityService.HydrateCore(item, "PreRead MediaSource Guard"))
+                var shadowBefore = MediaInfoReliabilityShadowStore.Status.RestoresSucceeded;
+                if (MediaInfoIntegrityMonitor.RecoverAsync(item, "PreRead MediaSource Guard", CancellationToken.None)
+                    .GetAwaiter().GetResult())
                 {
-                    Increment(status => status.PreReadRestoreSucceeded++);
+                    Increment(status =>
+                    {
+                        status.PreReadRestoreSucceeded++;
+                        if (MediaInfoReliabilityShadowStore.Status.RestoresSucceeded > shadowBefore)
+                            status.ShadowRestores++;
+                    });
                     var fresh = ResolveItem(item.InternalId);
                     if (fresh != null && itemIndex >= 0) __args[itemIndex] = fresh;
                 }
@@ -169,11 +186,12 @@ namespace StrmAssistant.Compatibility
 
             var fresh = ResolveItem(item.InternalId) ?? item;
             var baseline = SafeStreams(fresh);
-            if (CountInternalAv(baseline) == 0 && MediaInfoIntegrityService.SnapshotExists(fresh))
+            if (CountInternalAv(baseline) == 0 && MediaInfoIntegrityMonitor.ShouldRecover(fresh))
             {
                 try
                 {
-                    if (MediaInfoIntegrityService.HydrateCore(fresh, "ExternalTrack Baseline Guard"))
+                    if (MediaInfoIntegrityMonitor.RecoverAsync(fresh, "ExternalTrack Baseline Guard", CancellationToken.None)
+                        .GetAwaiter().GetResult())
                     {
                         fresh = ResolveItem(item.InternalId) ?? fresh;
                         baseline = SafeStreams(fresh);
@@ -199,6 +217,10 @@ namespace StrmAssistant.Compatibility
                 return false;
             }
 
+            if (MediaInfoReliabilityShadowStore.AppliesTo(fresh) &&
+                MediaInfoIntegrityService.IsCoreMediaInfoComplete(fresh))
+                MediaInfoReliabilityShadowStore.Capture(fresh);
+
             __state.ItemId = fresh.InternalId;
             __state.BaselineInternalAvCount = internalCount;
             __state.PreservedBaselineStreams = baseline.Where(stream => !IsManagedExternalTrack(stream)).ToList();
@@ -218,7 +240,11 @@ namespace StrmAssistant.Compatibility
             var fresh = ResolveItem(state.ItemId);
             if (fresh == null) return;
             var current = SafeStreams(fresh);
-            if (CountInternalAv(current) > 0) return;
+            if (CountInternalAv(current) > 0)
+            {
+                MediaInfoReliabilityShadowStore.Capture(fresh, true);
+                return;
+            }
 
             try
             {
@@ -243,6 +269,7 @@ namespace StrmAssistant.Compatibility
                     await Plugin.MediaInfoApi.SerializeMediaInfo(state.ItemId, directoryService, true,
                         "ExternalTrack Guard Repair").ConfigureAwait(false);
                 }
+                MediaInfoReliabilityShadowStore.Capture(ResolveItem(state.ItemId) ?? refreshed, true);
             }
             catch (Exception ex)
             {
