@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -346,7 +347,7 @@ namespace StrmAssistant.Experience
 
             var head = await SendWebDavProbeAsync(HttpMethod.Head, endpoint, options, cancellationToken)
                 .ConfigureAwait(false);
-            if (head.StatusCode == (int)HttpStatusCode.MethodNotAllowed || head.StatusCode == 501)
+            if (head.HttpStatusCode == (int)HttpStatusCode.MethodNotAllowed || head.HttpStatusCode == 501)
             {
                 var propFind = new HttpMethod("PROPFIND");
                 return await SendWebDavProbeAsync(propFind, endpoint, options, cancellationToken, true)
@@ -435,12 +436,12 @@ namespace StrmAssistant.Experience
                 }
 
                 var info = new FileInfo(path);
-                if (!string.IsNullOrWhiteSpace(info.LinkTarget))
+                var linkTarget = TryGetLinkTarget(info);
+                if (!string.IsNullOrWhiteSpace(linkTarget))
                 {
-                    var target = info.LinkTarget;
-                    return Path.IsPathRooted(target)
-                        ? target
-                        : Path.GetFullPath(Path.Combine(info.DirectoryName ?? string.Empty, target));
+                    return Path.IsPathRooted(linkTarget)
+                        ? linkTarget
+                        : Path.GetFullPath(Path.Combine(info.DirectoryName ?? string.Empty, linkTarget));
                 }
             }
             catch (Exception ex)
@@ -449,6 +450,23 @@ namespace StrmAssistant.Experience
                     Plugin.Instance.Logger.Debug("Remote Deep Delete target resolution failed: " + ex.Message);
             }
             return path;
+        }
+
+        private static string TryGetLinkTarget(FileInfo info)
+        {
+            if (info == null) return null;
+            try
+            {
+                var property = typeof(FileSystemInfo).GetProperty("LinkTarget",
+                                   BindingFlags.Instance | BindingFlags.Public)
+                               ?? info.GetType().GetProperty("LinkTarget",
+                                   BindingFlags.Instance | BindingFlags.Public);
+                return property?.GetValue(info) as string;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static bool IsHttpTarget(string value)
