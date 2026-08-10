@@ -48,6 +48,10 @@ namespace StrmAssistant.Experience
         public bool DeleteAccepted { get; set; }
         public bool VerifiedDeleted { get; set; }
         public bool AlreadyMissing { get; set; }
+        public bool PreProbeVerifiedExists { get; set; }
+        public bool PreProbeAlreadyMissing { get; set; }
+        public int PreProbeStatusCode { get; set; }
+        public string PreProbeError { get; set; }
         public int HttpStatusCode { get; set; }
         public int VerificationStatusCode { get; set; }
         public string Provider { get; set; }
@@ -95,8 +99,6 @@ namespace StrmAssistant.Experience
 
             if (mapping == null)
             {
-                // A remote URL must never silently fall through to the local delete path: that was
-                // the old failure mode where the STRM disappeared but the cloud object survived.
                 plan.Applicable = plan.TargetLooksRemote;
                 plan.Error = "The resolved media target did not match any configured remote path mapping.";
                 if (plan.TargetLooksRemote)
@@ -175,6 +177,50 @@ namespace StrmAssistant.Experience
             if (plan == null || !plan.Applicable || !plan.Allowed)
                 return Fail(plan, "Remote deletion plan is not allowed.");
 
+            // Never send a destructive request to a target that we cannot first read/verify through
+            // the same configured provider. This separates mapping/auth failures from delete failures.
+            var preProbe = await ProbeAsync(plan, cancellationToken).ConfigureAwait(false);
+            if (!preProbe.Success)
+            {
+                var failed = Fail(plan, "Remote pre-delete probe failed: " +
+                                        (preProbe.Error ?? "unknown probe failure"));
+                failed.PreProbeStatusCode = preProbe.HttpStatusCode;
+                failed.PreProbeError = preProbe.Error;
+                return failed;
+            }
+
+            if (preProbe.Missing)
+            {
+                if (!options.TreatNotFoundAsSuccess)
+                {
+                    var missingFailure = Fail(plan,
+                        "Remote target is already missing and TreatNotFoundAsSuccess is disabled.");
+                    missingFailure.PreProbeStatusCode = preProbe.HttpStatusCode;
+                    missingFailure.PreProbeAlreadyMissing = true;
+                    return missingFailure;
+                }
+
+                return new RemoteDeepDeleteExecutionResult
+                {
+                    Success = true,
+                    DeleteAccepted = false,
+                    VerifiedDeleted = true,
+                    AlreadyMissing = true,
+                    PreProbeAlreadyMissing = true,
+                    PreProbeStatusCode = preProbe.HttpStatusCode,
+                    VerificationStatusCode = preProbe.HttpStatusCode,
+                    Provider = plan.Provider,
+                    RemotePath = plan.RemotePath
+                };
+            }
+
+            if (!preProbe.Exists)
+            {
+                var ambiguous = Fail(plan, "Remote pre-delete probe succeeded but did not confirm target existence.");
+                ambiguous.PreProbeStatusCode = preProbe.HttpStatusCode;
+                return ambiguous;
+            }
+
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
 
@@ -191,10 +237,10 @@ namespace StrmAssistant.Experience
                     return Fail(plan, "No supported remote delete provider is selected.");
             }
 
+            result.PreProbeVerifiedExists = true;
+            result.PreProbeStatusCode = preProbe.HttpStatusCode;
             if (!result.DeleteAccepted) return result;
 
-            // A destructive provider returning 2xx is not sufficient. Verify the object is no
-            // longer visible before deleting the local STRM and Emby library item.
             var verification = await ProbeAsync(plan, cancellationToken).ConfigureAwait(false);
             result.VerificationStatusCode = verification.HttpStatusCode;
             result.VerifiedDeleted = verification.Success && verification.Missing;
@@ -410,8 +456,6 @@ namespace StrmAssistant.Experience
         private static void AddOpenListAuthorization(HttpRequestMessage request, string token)
         {
             if (string.IsNullOrWhiteSpace(token)) return;
-            // Keep user-supplied schemes intact. OpenList/AList deployments exist in the wild with
-            // both raw JWT Authorization values and explicit "Bearer <token>" front-end proxies.
             request.Headers.TryAddWithoutValidation("Authorization", token.Trim());
         }
 
