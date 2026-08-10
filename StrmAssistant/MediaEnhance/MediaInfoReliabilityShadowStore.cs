@@ -45,7 +45,8 @@ namespace StrmAssistant.MediaEnhance
     /// <summary>
     /// Small plugin-owned shadow store for STRM core playback metadata. This is independent from the
     /// user's optional MediaInfo JSON persistence mode. It stores neither the raw STRM target URL nor
-    /// external-track paths: only internal streams plus a SHA-256 target fingerprint are persisted.
+    /// external-track paths. HTTP(S) target identity ignores query/fragment values so refreshed signed
+    /// URLs for the same authority/path do not invalidate playback metadata.
     /// </summary>
     public static class MediaInfoReliabilityShadowStore
     {
@@ -109,8 +110,6 @@ namespace StrmAssistant.MediaEnhance
                     return false;
                 }
 
-                // The shadow is for playback-critical internal streams only. External subtitle/audio
-                // paths may contain private mount paths or signed URLs and are intentionally excluded.
                 var streams = fresh.GetMediaStreams()?
                                   .Where(stream => stream != null && !stream.IsExternal)
                                   .ToList() ?? new List<MediaStream>();
@@ -188,8 +187,6 @@ namespace StrmAssistant.MediaEnhance
                     File.Copy(backup, path, true);
                 }
 
-                // Preserve sidecars that Emby currently knows about while restoring only the lost
-                // internal streams from the shadow. This avoids shadow restore deleting subtitles.
                 var currentExternal = fresh.GetMediaStreams()?
                                            .Where(stream => stream != null && stream.IsExternal)
                                            .ToList() ?? new List<MediaStream>();
@@ -319,9 +316,34 @@ namespace StrmAssistant.MediaEnhance
                 var target = File.ReadLines(item.Path)
                     .Select(line => line?.Trim())
                     .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
-                return string.IsNullOrWhiteSpace(target) ? null : ComputeHash(target);
+                return string.IsNullOrWhiteSpace(target) ? null : ComputeHash(CanonicalizeShortcutTarget(target));
             }
             catch { return null; }
+        }
+
+        private static string CanonicalizeShortcutTarget(string target)
+        {
+            var text = (target ?? string.Empty).Trim();
+            if (Uri.TryCreate(text, UriKind.Absolute, out var uri) &&
+                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+            {
+                var scheme = uri.Scheme.ToLowerInvariant();
+                var host = uri.IdnHost.ToLowerInvariant();
+                var authority = uri.IsDefaultPort ? host : host + ":" + uri.Port;
+                string path;
+                try { path = Uri.UnescapeDataString(uri.AbsolutePath ?? string.Empty); }
+                catch { path = uri.AbsolutePath ?? string.Empty; }
+                return scheme + "://" + authority + NormalizeRemoteIdentityPath(path);
+            }
+            return NormalizeSource(text);
+        }
+
+        private static string NormalizeRemoteIdentityPath(string value)
+        {
+            var path = (value ?? string.Empty).Replace('\\', '/');
+            while (path.Contains("//")) path = path.Replace("//", "/");
+            if (!path.StartsWith("/", StringComparison.Ordinal)) path = "/" + path;
+            return path;
         }
 
         private static string ComputeHash(string value)
