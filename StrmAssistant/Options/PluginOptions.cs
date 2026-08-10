@@ -63,6 +63,13 @@ namespace StrmAssistant.Options
             }
 
             var experience = ExperienceEnhanceOptions;
+            if (experience != null)
+            {
+                // Once this generation of the UI is saved, even an all-default/empty remote-delete
+                // configuration is an explicit user choice and must never fall back to a legacy file.
+                experience.RemoteDeepDeleteUiAuthoritative = true;
+            }
+
             if (experience?.EnableRemoteDeepDelete == true)
             {
                 if (!experience.EnableDeepDelete)
