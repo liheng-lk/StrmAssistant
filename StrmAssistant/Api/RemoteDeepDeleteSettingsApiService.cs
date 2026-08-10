@@ -77,15 +77,21 @@ namespace StrmAssistant.Api
         public object Post(SaveRemoteDeepDeleteSettings request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
+
+            if (!Enum.TryParse(request.Provider ?? string.Empty, true, out RemoteDeepDeleteProviderType provider))
+                provider = RemoteDeepDeleteProviderType.None;
+
             if (request.Enabled && !request.Confirm)
                 throw new InvalidOperationException("Enabling remote deletion requires Confirm=true.");
             if (request.DeleteAssociatedSidecars && !request.Confirm)
                 throw new InvalidOperationException("Enabling remote sidecar deletion requires Confirm=true.");
+            if (request.DeleteAssociatedSidecars && provider != RemoteDeepDeleteProviderType.OpenList)
+                throw new InvalidOperationException("Associated remote sidecar deletion is supported only with the OpenList provider.");
+            if (request.DeleteAssociatedSidecars && !request.TreatNotFoundAsSuccess)
+                throw new InvalidOperationException(
+                    "Associated remote sidecar deletion requires TreatNotFoundAsSuccess=true so a partially completed transaction can be retried idempotently after the main remote file is already gone.");
 
             var current = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
-            if (!Enum.TryParse(request.Provider ?? string.Empty, true, out RemoteDeepDeleteProviderType provider))
-                provider = RemoteDeepDeleteProviderType.None;
-
             var next = new RemoteDeepDeleteOptions
             {
                 Enabled = request.Enabled,
@@ -141,9 +147,11 @@ namespace StrmAssistant.Api
             if (options.Enabled && RemoteDeepDeleteRuntimeSettings.ParseAllowedRoots(options.AllowedRemoteRoots).Count == 0)
                 view.Warnings.Add("No allowed remote roots are configured; destructive remote calls remain blocked.");
             if (options.DeleteAssociatedSidecars && options.Provider != RemoteDeepDeleteProviderType.OpenList)
-                view.Warnings.Add("Remote sidecar deletion is currently implemented only for OpenList; WebDAV continues to delete only the main remote object.");
+                view.Warnings.Add("Invalid saved state: remote sidecar deletion is supported only for OpenList. Disable it before destructive execution.");
+            if (options.DeleteAssociatedSidecars && !options.TreatNotFoundAsSuccess)
+                view.Warnings.Add("Invalid saved state: sidecar cleanup requires TreatNotFoundAsSuccess=true for safe idempotent retry.");
             if (options.DeleteAssociatedSidecars)
-                view.Warnings.Add("Remote sidecar cleanup is destructive and intentionally conservative: only same-stem metadata/subtitle/image files from the actual OpenList directory listing are eligible.");
+                view.Warnings.Add("Remote sidecar cleanup is destructive and intentionally conservative: only same-stem metadata/subtitle/image files from the actual OpenList directory listing are eligible, and the candidate set is frozen before main-file deletion.");
             return view;
         }
     }
