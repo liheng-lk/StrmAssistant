@@ -4,9 +4,10 @@ using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Plugins;
 using StrmAssistant.MediaEnhance;
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Reflection;
-using System.Threading.Tasks;
+using System.Threading;
 
 namespace StrmAssistant.Compatibility
 {
@@ -14,6 +15,9 @@ namespace StrmAssistant.Compatibility
     {
         public int SaveMediaStreamsTargetsPatched { get; set; }
         public long DeferredCapturesScheduled { get; set; }
+        public long DeferredCapturesCompleted { get; set; }
+        public long DeferredCapturesSkipped { get; set; }
+        public int PendingCaptureCount { get; set; }
         public string LastError { get; set; }
         public string Error { get; set; }
     }
@@ -25,9 +29,9 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// Captures a STRM reliability shadow after MediaStreams are persisted. Playback pre-read restore
-    /// is intentionally owned only by MediaInfoPreReadAndExternalTrackGuardEntryPoint so a playback
-    /// request crosses one recovery prefix rather than two competing Harmony prefixes.
+    /// Captures STRM reliability shadows after MediaStreams are persisted. The post-save hook only
+    /// enqueues an ItemId; one bounded timer drains a small deduplicated batch. This avoids creating
+    /// thousands of delayed Tasks during a large library extraction/scan.
     /// </summary>
     public sealed class MediaInfoReliabilityShadowEntryPoint : IServerEntryPoint
     {
@@ -77,7 +81,12 @@ namespace StrmAssistant.Compatibility
                 }
 
                 if (status.SaveMediaStreamsTargetsPatched == 0)
+                {
                     status.Error = "SaveMediaStreams targets were discovered but none could be patched.";
+                    return;
+                }
+
+                MediaInfoReliabilityShadowPatches.Start();
             }
             catch (Exception ex)
             {
@@ -88,12 +97,40 @@ namespace StrmAssistant.Compatibility
 
         public void Dispose()
         {
+            MediaInfoReliabilityShadowPatches.Stop();
             try { _harmony?.UnpatchAll(HarmonyId); } catch { }
         }
     }
 
     public static class MediaInfoReliabilityShadowPatches
     {
+        private const int MaxBatchPerTick = 50;
+        private static readonly ConcurrentDictionary<long, DateTimeOffset> Pending =
+            new ConcurrentDictionary<long, DateTimeOffset>();
+        private static readonly object TimerSync = new object();
+        private static Timer _timer;
+        private static int _draining;
+
+        public static void Start()
+        {
+            lock (TimerSync)
+            {
+                if (_timer != null) return;
+                _timer = new Timer(Drain, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+            }
+        }
+
+        public static void Stop()
+        {
+            lock (TimerSync)
+            {
+                try { _timer?.Dispose(); } catch { }
+                _timer = null;
+                Pending.Clear();
+                MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = 0;
+            }
+        }
+
         public static void SaveMediaStreamsPostfix(object[] __args)
         {
             if (__args == null) return;
@@ -106,26 +143,57 @@ namespace StrmAssistant.Compatibility
                 var item = libraryManager?.GetItemById(itemId);
                 if (!MediaInfoReliabilityShadowStore.AppliesTo(item)) return;
 
-                MediaInfoReliabilityShadowRuntimeState.Status.DeferredCapturesScheduled++;
-                _ = Task.Run(async () =>
+                var isNew = Pending.TryAdd(itemId, DateTimeOffset.UtcNow);
+                if (!isNew) Pending[itemId] = DateTimeOffset.UtcNow;
+                if (isNew) MediaInfoReliabilityShadowRuntimeState.Status.DeferredCapturesScheduled++;
+                MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = Pending.Count;
+            }
+            catch (Exception ex)
+            {
+                MediaInfoReliabilityShadowRuntimeState.Status.LastError = ex.GetBaseException().Message;
+            }
+        }
+
+        private static void Drain(object state)
+        {
+            if (Interlocked.Exchange(ref _draining, 1) != 0) return;
+            try
+            {
+                var now = DateTimeOffset.UtcNow;
+                var ready = Pending
+                    .Where(pair => now - pair.Value >= TimeSpan.FromMilliseconds(750))
+                    .OrderBy(pair => pair.Value)
+                    .Take(MaxBatchPerTick)
+                    .Select(pair => pair.Key)
+                    .ToArray();
+                if (ready.Length == 0) return;
+
+                var libraryManager = Plugin.Instance?.ApplicationHost?.Resolve<ILibraryManager>();
+                foreach (var itemId in ready)
                 {
+                    if (!Pending.TryRemove(itemId, out _)) continue;
                     try
                     {
-                        // SaveMediaStreams often precedes the Item runtime/container update. A short
-                        // delay lets the same extraction transaction finish before the snapshot check.
-                        await Task.Delay(750).ConfigureAwait(false);
-                        var fresh = libraryManager.GetItemById(itemId);
-                        MediaInfoReliabilityShadowStore.Capture(fresh);
+                        var item = libraryManager?.GetItemById(itemId);
+                        if (MediaInfoReliabilityShadowStore.Capture(item))
+                            MediaInfoReliabilityShadowRuntimeState.Status.DeferredCapturesCompleted++;
+                        else
+                            MediaInfoReliabilityShadowRuntimeState.Status.DeferredCapturesSkipped++;
                     }
                     catch (Exception ex)
                     {
                         MediaInfoReliabilityShadowRuntimeState.Status.LastError = ex.GetBaseException().Message;
                     }
-                });
+                }
             }
             catch (Exception ex)
             {
                 MediaInfoReliabilityShadowRuntimeState.Status.LastError = ex.GetBaseException().Message;
+            }
+            finally
+            {
+                MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = Pending.Count;
+                Volatile.Write(ref _draining, 0);
             }
         }
 
