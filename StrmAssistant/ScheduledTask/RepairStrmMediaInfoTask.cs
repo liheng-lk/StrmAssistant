@@ -8,6 +8,7 @@ using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -33,7 +34,7 @@ namespace StrmAssistant.ScheduledTask
         public string Key => "StrmAssistantRepairMissingStrmMediaInfo";
         public string Category => "Strm Assistant";
         public string Description =>
-            "手工修复核心媒体信息不完整的 STRM。优先从本地持久化/可靠性缓存恢复；没有可用快照时才访问媒体源执行一次 Emby MediaInfo 重建。不会自动定时运行。";
+            "手工修复核心媒体信息不完整的 STRM。优先从本地持久化/可靠性缓存恢复；没有可用快照时才访问媒体源执行一次 Emby MediaInfo 重建。媒体库扫描运行时会拒绝启动，不会自动定时运行。";
 
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
         {
@@ -42,6 +43,10 @@ namespace StrmAssistant.ScheduledTask
 
         public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
         {
+            if (IsLibraryScanRunning())
+                throw new InvalidOperationException(
+                    "Emby library scan is currently running. Run the STRM MediaInfo repair task after the scan completes so remote probes do not compete with the scanner.");
+
             var all = _libraryManager.GetItemList(new InternalItemsQuery
             {
                 HasPath = true,
@@ -123,6 +128,20 @@ namespace StrmAssistant.ScheduledTask
             Plugin.Instance?.Logger?.Info(
                 "STRM MediaInfo repair task completed: candidates={0}, succeeded={1}, localRecovered={2}, remoteRebuilt={3}, failed={4}.",
                 candidates.Count, succeeded, localRecovered, remoteRebuilt, failed);
+        }
+
+        private bool IsLibraryScanRunning()
+        {
+            try
+            {
+                var property = _libraryManager.GetType().GetProperty("IsScanRunning",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                return property?.PropertyType == typeof(bool) && property.GetValue(_libraryManager) is bool running && running;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }
