@@ -20,6 +20,7 @@ namespace StrmAssistant.Api
         public string AllowedRemoteRoots { get; set; }
         public int TimeoutSeconds { get; set; }
         public bool TreatNotFoundAsSuccess { get; set; }
+        public bool DeleteAssociatedSidecars { get; set; }
         public string SettingsPath { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
@@ -45,6 +46,7 @@ namespace StrmAssistant.Api
         public string AllowedRemoteRoots { get; set; }
         public int TimeoutSeconds { get; set; } = 30;
         public bool TreatNotFoundAsSuccess { get; set; } = true;
+        public bool DeleteAssociatedSidecars { get; set; }
         public bool ClearAccessToken { get; set; }
         public bool ClearPassword { get; set; }
     }
@@ -77,6 +79,8 @@ namespace StrmAssistant.Api
             if (request == null) throw new ArgumentNullException(nameof(request));
             if (request.Enabled && !request.Confirm)
                 throw new InvalidOperationException("Enabling remote deletion requires Confirm=true.");
+            if (request.DeleteAssociatedSidecars && !request.Confirm)
+                throw new InvalidOperationException("Enabling remote sidecar deletion requires Confirm=true.");
 
             var current = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
             if (!Enum.TryParse(request.Provider ?? string.Empty, true, out RemoteDeepDeleteProviderType provider))
@@ -93,7 +97,8 @@ namespace StrmAssistant.Api
                 PathMappings = request.PathMappings,
                 AllowedRemoteRoots = request.AllowedRemoteRoots,
                 TimeoutSeconds = request.TimeoutSeconds,
-                TreatNotFoundAsSuccess = request.TreatNotFoundAsSuccess
+                TreatNotFoundAsSuccess = request.TreatNotFoundAsSuccess,
+                DeleteAssociatedSidecars = request.DeleteAssociatedSidecars
             };
             return ToView(RemoteDeepDeleteRuntimeSettings.Save(next));
         }
@@ -125,15 +130,20 @@ namespace StrmAssistant.Api
                 AllowedRemoteRoots = options.AllowedRemoteRoots,
                 TimeoutSeconds = options.TimeoutSeconds,
                 TreatNotFoundAsSuccess = options.TreatNotFoundAsSuccess,
+                DeleteAssociatedSidecars = options.DeleteAssociatedSidecars,
                 SettingsPath = RemoteDeepDeleteRuntimeSettings.SettingsPath
             };
 
             if (options.Enabled && options.Provider == RemoteDeepDeleteProviderType.OpenList && !view.HasAccessToken)
                 view.Warnings.Add("OpenList is enabled but no AccessToken is stored.");
             if (options.Enabled && RemoteDeepDeleteRuntimeSettings.ParseMappings(options.PathMappings).Count == 0)
-                view.Warnings.Add("No valid path mappings are configured; remote STRM deletion will be blocked instead of silently deleting only the local STRM.");
+                view.Warnings.Add("No valid manual path mappings are configured. Same-origin OpenList /d/ targets may auto-map; other remote STRM targets remain blocked.");
             if (options.Enabled && RemoteDeepDeleteRuntimeSettings.ParseAllowedRoots(options.AllowedRemoteRoots).Count == 0)
                 view.Warnings.Add("No allowed remote roots are configured; destructive remote calls remain blocked.");
+            if (options.DeleteAssociatedSidecars && options.Provider != RemoteDeepDeleteProviderType.OpenList)
+                view.Warnings.Add("Remote sidecar deletion is currently implemented only for OpenList; WebDAV continues to delete only the main remote object.");
+            if (options.DeleteAssociatedSidecars)
+                view.Warnings.Add("Remote sidecar cleanup is destructive and intentionally conservative: only same-stem metadata/subtitle/image files from the actual OpenList directory listing are eligible.");
             return view;
         }
     }
