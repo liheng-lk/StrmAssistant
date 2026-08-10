@@ -6,6 +6,7 @@ using MediaBrowser.Model.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -24,7 +25,7 @@ namespace StrmAssistant.MediaEnhance
         public string Key => "StrmAssistantMediaInfoReliabilitySeed";
         public string Category => "Strm Assistant";
         public string Description =>
-            "手工把 Emby 数据库中当前已完整的 STRM 核心媒体信息复制到插件可靠性影子缓存，并验证当前 schema 迁移。不执行 ffprobe，也不访问 STRM 指向的远端媒体。";
+            "手工把 MediaInfo 配置范围内、当前已完整的 STRM 核心媒体信息复制到插件可靠性影子缓存，并验证当前 schema 迁移。不执行 ffprobe，也不访问 STRM 指向的远端媒体；媒体库扫描运行时会拒绝启动。";
 
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
         {
@@ -33,6 +34,10 @@ namespace StrmAssistant.MediaEnhance
 
         public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
         {
+            if (IsLibraryScanRunning())
+                throw new InvalidOperationException(
+                    "Emby library scan is currently running. Run the STRM reliability seed after the scan completes to avoid competing database/filesystem I/O.");
+
             var migration = MediaInfoReliabilitySeedMigrationState.Status;
             if (migration != null)
             {
@@ -50,6 +55,7 @@ namespace StrmAssistant.MediaEnhance
 
             var candidates = items
                 .Where(MediaInfoReliabilityShadowStore.AppliesTo)
+                .Where(item => Plugin.LibraryApi?.IsLibraryInScope(item) == true)
                 .GroupBy(item => item.InternalId)
                 .Select(group => group.First())
                 .ToList();
@@ -87,7 +93,7 @@ namespace StrmAssistant.MediaEnhance
                 MediaInfoReliabilitySeedMigrationEntryPoint.MarkCompleted(completeItems.Count, protectedCount);
                 progress?.Report(100);
                 Plugin.Instance?.Logger?.Info(
-                    "STRM MediaInfo reliability seed completed: candidates={0}, complete={1}, captured={2}, protected={3}, incompleteSkipped={4}",
+                    "STRM MediaInfo reliability seed completed: inScopeCandidates={0}, complete={1}, captured={2}, protected={3}, incompleteSkipped={4}",
                     candidates.Count, completeItems.Count, captured, protectedCount, incomplete);
             }
             catch (OperationCanceledException)
@@ -99,6 +105,20 @@ namespace StrmAssistant.MediaEnhance
             {
                 if (migration != null) migration.Error = ex.GetBaseException().Message;
                 throw;
+            }
+        }
+
+        private bool IsLibraryScanRunning()
+        {
+            try
+            {
+                var property = _libraryManager.GetType().GetProperty("IsScanRunning",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                return property?.PropertyType == typeof(bool) && property.GetValue(_libraryManager) is bool running && running;
+            }
+            catch
+            {
+                return false;
             }
         }
     }
