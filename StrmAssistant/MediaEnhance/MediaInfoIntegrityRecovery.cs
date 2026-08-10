@@ -103,85 +103,9 @@ namespace StrmAssistant.MediaEnhance
     }
 
     /// <summary>
-    /// Background startup warm-up. It repairs only incomplete items that already have a persisted
-    /// snapshot; it never performs media probing and therefore does not block Emby startup.
-    /// </summary>
-    public sealed class MediaInfoIntegrityStartupEntryPoint : IServerEntryPoint
-    {
-        private readonly ILibraryManager _libraryManager;
-        private CancellationTokenSource _cts;
-        private Task _worker;
-
-        public MediaInfoIntegrityStartupEntryPoint(ILibraryManager libraryManager)
-        {
-            _libraryManager = libraryManager;
-        }
-
-        public void Run()
-        {
-            if (_worker != null) return;
-            _cts = new CancellationTokenSource();
-            _worker = Task.Run(() => WarmAsync(_cts.Token));
-        }
-
-        public void Dispose()
-        {
-            try { _cts?.Cancel(); } catch { }
-        }
-
-        private async Task WarmAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(12), cancellationToken).ConfigureAwait(false);
-                var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
-                if (options == null ||
-                    options.PersistMediaInfoMode == MediaInfoExtractOptions.PersistMediaInfoOption.None.ToString())
-                    return;
-
-                var items = _libraryManager.GetItemList(new InternalItemsQuery
-                {
-                    HasPath = true,
-                    MediaTypes = options.PersistMusicMediaInfo
-                        ? new[] { MediaType.Video, MediaType.Audio }
-                        : new[] { MediaType.Video }
-                }) ?? Array.Empty<BaseItem>();
-
-                var candidates = items
-                    .Where(item => MediaInfoIntegrityMonitor.PersistenceEnabledFor(item, options))
-                    .Where(item => Plugin.LibraryApi.IsLibraryInScope(item))
-                    .Where(item => !MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
-                    .Where(MediaInfoIntegrityService.SnapshotExists)
-                    .GroupBy(item => item.InternalId)
-                    .Select(group => group.First())
-                    .ToList();
-
-                var repaired = 0;
-                foreach (var item in candidates)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (MediaInfoIntegrityService.HydrateCore(item, "Startup IntegrityWarmup")) repaired++;
-                    // Yield so a large library can never monopolize the server thread pool.
-                    await Task.Delay(1, cancellationToken).ConfigureAwait(false);
-                }
-
-                if (candidates.Count > 0)
-                    Plugin.Instance.Logger.Info("MediaInfo startup integrity warm-up: {0}/{1} snapshots restored.",
-                        repaired, candidates.Count);
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception ex)
-            {
-                Plugin.Instance?.Logger?.Warn("MediaInfo startup integrity warm-up failed: " + ex.Message);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Full recovery pass after a library scan. Only items with an existing persisted snapshot are
-    /// touched. No ffprobe or remote network request is ever launched by this task.
+    /// Recovery pass after an explicit/full library scan. No startup-wide warm-up is performed:
+    /// large STRM libraries therefore do not compete with normal startup or first playback for DB/IO.
+    /// The pre-read guard handles individual playback on demand.
     /// </summary>
     public sealed class MediaInfoIntegrityPostScanTask : ILibraryPostScanTask
     {
