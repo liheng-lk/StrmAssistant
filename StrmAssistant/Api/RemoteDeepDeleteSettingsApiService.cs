@@ -5,8 +5,6 @@ using MediaBrowser.Model.Services;
 using StrmAssistant.Experience;
 using System;
 using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace StrmAssistant.Api
 {
@@ -59,14 +57,6 @@ namespace StrmAssistant.Api
         public string Id { get; set; }
     }
 
-    [Route("/StrmAssistant/DeepDelete/{Id}/RemoteProbe", "GET",
-        Summary = "Verify whether the mapped remote object currently exists without deleting it")]
-    [Authenticated(Roles = "Admin")]
-    public sealed class GetRemoteDeepDeleteProbe : IReturn<RemoteDeepDeleteProbeResult>
-    {
-        public string Id { get; set; }
-    }
-
     public sealed class RemoteDeepDeleteSettingsApiService : BaseApiService
     {
         private readonly ILibraryManager _libraryManager;
@@ -114,31 +104,6 @@ namespace StrmAssistant.Api
             return item == null
                 ? new RemoteDeepDeletePlan { Error = "Item was not found or id is invalid." }
                 : _remoteService.BuildPlan(item);
-        }
-
-        public async Task<object> Get(GetRemoteDeepDeleteProbe request)
-        {
-            var item = ResolveItem(request?.Id);
-            if (item == null)
-                return new RemoteDeepDeleteProbeResult { Error = "Item was not found or id is invalid." };
-
-            var plan = _remoteService.BuildPlan(item);
-            if (!plan.Applicable)
-                return new RemoteDeepDeleteProbeResult
-                {
-                    Provider = plan.Provider,
-                    RemotePath = plan.RemotePath,
-                    Error = plan.Error ?? "Remote deletion is not applicable to this item."
-                };
-            if (!plan.Allowed)
-                return new RemoteDeepDeleteProbeResult
-                {
-                    Provider = plan.Provider,
-                    RemotePath = plan.RemotePath,
-                    Error = plan.Error ?? "Remote plan is blocked by configuration."
-                };
-
-            return await _remoteService.ProbeAsync(plan, CancellationToken.None).ConfigureAwait(false);
         }
 
         private MediaBrowser.Controller.Entities.BaseItem ResolveItem(string id)
