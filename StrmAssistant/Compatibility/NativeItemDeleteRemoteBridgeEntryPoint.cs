@@ -6,6 +6,7 @@ using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Services;
 using StrmAssistant.Common;
 using StrmAssistant.Experience;
+using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -34,16 +35,6 @@ namespace StrmAssistant.Compatibility
             new NativeItemDeleteRemoteBridgeStatus();
     }
 
-    /// <summary>
-    /// Bridges Emby's explicit single-item REST deletion routes (/Items/{Id} DELETE and the legacy
-    /// /Items/{Id}/Delete POST) to the configured remote deep-delete provider. It intentionally does
-    /// not patch ILibraryManager.DeleteItem or ItemRemoved events: those can be raised by scans and
-    /// background maintenance and are not proof of a user-authorized destructive request.
-    ///
-    /// Remote deletion occurs only after this bridge independently resolves the authenticated user and
-    /// verifies content-deletion permission. If a remote target is applicable but its remote deletion
-    /// fails, the original Emby delete method is aborted so the local STRM is preserved.
-    /// </summary>
     public sealed class NativeItemDeleteRemoteBridgeEntryPoint : IServerEntryPoint
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.native-delete-remote-bridge";
@@ -250,10 +241,7 @@ namespace StrmAssistant.Compatibility
                     ?.GetValue(request);
                 return value?.ToString();
             }
-            catch
-            {
-                return null;
-            }
+            catch { return null; }
         }
 
         private static BaseItem ResolveItem(ILibraryManager libraryManager, string id)
@@ -297,10 +285,7 @@ namespace StrmAssistant.Compatibility
                 var authorization = Plugin.Instance?.ApplicationHost?.Resolve<IAuthorizationContext>();
                 return authorization?.GetAuthorizationInfo(request)?.User;
             }
-            catch
-            {
-                return null;
-            }
+            catch { return null; }
         }
 
         private static bool CanDeleteItem(User user, BaseItem item, ILibraryManager libraryManager)
@@ -317,10 +302,7 @@ namespace StrmAssistant.Compatibility
                               ?? Array.Empty<BaseItem>();
                 return folders.Any(folder => allowed.Any(value => MatchesFolderId(value, folder)));
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         private static bool MatchesFolderId(string value, BaseItem folder)
@@ -351,6 +333,7 @@ namespace StrmAssistant.Compatibility
                     var backup = MediaInfoPersistenceReliabilityPatches.BackupPath(primary);
                     if (!string.IsNullOrWhiteSpace(backup) && System.IO.File.Exists(backup))
                         System.IO.File.Delete(backup);
+                    MediaInfoReliabilityShadowStore.Delete(item);
                 }
                 finally
                 {
@@ -359,7 +342,7 @@ namespace StrmAssistant.Compatibility
             }
             catch (Exception ex)
             {
-                Plugin.Instance?.Logger?.Warn("Native delete bridge could not clear MediaInfo snapshot: " + ex.Message);
+                Plugin.Instance?.Logger?.Warn("Native delete bridge could not clear MediaInfo persistence/shadow snapshot: " + ex.Message);
             }
         }
 
