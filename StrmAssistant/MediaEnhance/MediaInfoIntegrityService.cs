@@ -33,6 +33,8 @@ namespace StrmAssistant.MediaEnhance
         public int MediaStreamCount { get; set; }
         public int VideoStreamCount { get; set; }
         public int AudioStreamCount { get; set; }
+        public int InternalVideoStreamCount { get; set; }
+        public int InternalAudioStreamCount { get; set; }
         public string PrimarySnapshotPath { get; set; }
         public bool PrimarySnapshotExists { get; set; }
         public bool PrimarySnapshotValid { get; set; }
@@ -41,6 +43,11 @@ namespace StrmAssistant.MediaEnhance
         public bool BackupSnapshotExists { get; set; }
         public bool BackupSnapshotValid { get; set; }
         public string BackupSnapshotError { get; set; }
+        public string ShadowSnapshotPath { get; set; }
+        public bool ShadowSnapshotExists { get; set; }
+        public bool ShadowSnapshotValid { get; set; }
+        public bool RecoverableFromPersistedSnapshot { get; set; }
+        public bool RecoverableFromShadow { get; set; }
         public bool Recoverable { get; set; }
         public bool PlaybackProbeRisk { get; set; }
         public string RecommendedAction { get; set; }
@@ -79,6 +86,8 @@ namespace StrmAssistant.MediaEnhance
             result.MediaStreamCount = streams.Count;
             result.VideoStreamCount = streams.Count(v => v.Type == MediaStreamType.Video);
             result.AudioStreamCount = streams.Count(v => v.Type == MediaStreamType.Audio);
+            result.InternalVideoStreamCount = streams.Count(v => v.Type == MediaStreamType.Video && !v.IsExternal);
+            result.InternalAudioStreamCount = streams.Count(v => v.Type == MediaStreamType.Audio && !v.IsExternal);
             result.CoreMediaInfoComplete = IsCoreMediaInfoComplete(item, streams);
 
             try
@@ -97,20 +106,42 @@ namespace StrmAssistant.MediaEnhance
                 result.PrimarySnapshotError = ex.Message;
             }
 
-            result.Recoverable = !result.CoreMediaInfoComplete &&
-                                 (result.PrimarySnapshotValid || result.BackupSnapshotValid);
-            result.PlaybackProbeRisk = !result.CoreMediaInfoComplete && item.IsShortcut;
+            try
+            {
+                result.ShadowSnapshotPath = MediaInfoReliabilityShadowStore.GetPath(item);
+                result.ShadowSnapshotExists = !string.IsNullOrWhiteSpace(result.ShadowSnapshotPath) &&
+                                              (File.Exists(result.ShadowSnapshotPath) ||
+                                               File.Exists(result.ShadowSnapshotPath + ".bak"));
+                result.ShadowSnapshotValid = MediaInfoReliabilityShadowStore.Exists(item);
+            }
+            catch
+            {
+                result.ShadowSnapshotValid = false;
+            }
 
-            if (!result.PersistenceEnabled)
+            result.RecoverableFromPersistedSnapshot = !result.CoreMediaInfoComplete && result.PersistenceEnabled &&
+                                                       result.LibraryInScope &&
+                                                       (result.PrimarySnapshotValid || result.BackupSnapshotValid);
+            result.RecoverableFromShadow = !result.CoreMediaInfoComplete && result.ShadowSnapshotValid;
+            result.Recoverable = result.RecoverableFromPersistedSnapshot || result.RecoverableFromShadow;
+            result.PlaybackProbeRisk = !result.CoreMediaInfoComplete && item.IsShortcut && !result.Recoverable;
+
+            if (result.CoreMediaInfoComplete)
+                result.RecommendedAction = MediaInfoReliabilityShadowStore.AppliesTo(item)
+                    ? "Core MediaInfo is complete. The STRM shadow cache can be refreshed without probing the remote media."
+                    : "Core MediaInfo is complete; playback should not require a recovery probe.";
+            else if (result.RecoverableFromShadow)
+                result.RecommendedAction = "Restore core MediaInfo from the validated STRM shadow cache before playback.";
+            else if (result.RecoverableFromPersistedSnapshot)
+                result.RecommendedAction = "Restore core MediaInfo from the validated persisted MediaInfo snapshot.";
+            else if (!result.PersistenceEnabled && MediaInfoReliabilityShadowStore.AppliesTo(item))
+                result.RecommendedAction = "No validated shadow exists yet. Run one successful MediaInfo extraction/refresh; the plugin will then keep a private STRM core shadow even with persistence disabled.";
+            else if (!result.PersistenceEnabled)
                 result.RecommendedAction = "Enable MediaInfo persistence for this media type.";
             else if (!result.LibraryInScope)
                 result.RecommendedAction = "Add the library to the MediaInfo extraction scope.";
-            else if (result.CoreMediaInfoComplete)
-                result.RecommendedAction = "Core MediaInfo is complete; playback should not require a recovery probe.";
-            else if (result.Recoverable)
-                result.RecommendedAction = "Restore core MediaInfo from the validated persisted snapshot.";
             else
-                result.RecommendedAction = "No valid persisted snapshot exists; run one explicit MediaInfo extraction, then persist it.";
+                result.RecommendedAction = "No valid recovery snapshot exists; run one explicit MediaInfo extraction to rebuild core streams.";
 
             return result;
         }
@@ -126,10 +157,11 @@ namespace StrmAssistant.MediaEnhance
                 return false;
 
             if (item is Audio)
-                return streams.Any(v => v.Type == MediaStreamType.Audio);
+                return streams.Any(v => v.Type == MediaStreamType.Audio && !v.IsExternal);
             if (item is Video)
-                return streams.Any(v => v.Type == MediaStreamType.Video);
-            return streams.Any(v => v.Type == MediaStreamType.Video || v.Type == MediaStreamType.Audio);
+                return streams.Any(v => v.Type == MediaStreamType.Video && !v.IsExternal);
+            return streams.Any(v => !v.IsExternal &&
+                                    (v.Type == MediaStreamType.Video || v.Type == MediaStreamType.Audio));
         }
 
         public static bool SnapshotExists(BaseItem item)
@@ -227,7 +259,8 @@ namespace StrmAssistant.MediaEnhance
                     workItem.Container = mediaSource.Container;
                     workItem.TotalBitrate = mediaSource.Bitrate.GetValueOrDefault();
 
-                    var video = streams.Where(v => v.Type == MediaStreamType.Video && v.Width.HasValue && v.Height.HasValue)
+                    var video = streams.Where(v => v.Type == MediaStreamType.Video && !v.IsExternal &&
+                                                   v.Width.HasValue && v.Height.HasValue)
                         .OrderByDescending(v => (long)v.Width.Value * v.Height.Value)
                         .FirstOrDefault();
                     if (video != null)
@@ -296,7 +329,7 @@ namespace StrmAssistant.MediaEnhance
                 var streams = snapshot.MediaSourceInfo.MediaStreams?.ToList() ?? new List<MediaStream>();
                 if (!SnapshotStreamsMatchItem(item, streams))
                 {
-                    error = "Snapshot does not contain the expected core media stream.";
+                    error = "Snapshot does not contain the expected internal core media stream.";
                     snapshot = null;
                     return false;
                 }
@@ -313,9 +346,10 @@ namespace StrmAssistant.MediaEnhance
         private static bool SnapshotStreamsMatchItem(BaseItem item, IReadOnlyCollection<MediaStream> streams)
         {
             if (streams == null) return false;
-            if (item is Audio) return streams.Any(v => v.Type == MediaStreamType.Audio);
-            if (item is Video) return streams.Any(v => v.Type == MediaStreamType.Video);
-            return streams.Any(v => v.Type == MediaStreamType.Video || v.Type == MediaStreamType.Audio);
+            if (item is Audio) return streams.Any(v => v.Type == MediaStreamType.Audio && !v.IsExternal);
+            if (item is Video) return streams.Any(v => v.Type == MediaStreamType.Video && !v.IsExternal);
+            return streams.Any(v => !v.IsExternal &&
+                                    (v.Type == MediaStreamType.Video || v.Type == MediaStreamType.Audio));
         }
 
         private static List<MediaStream> SafeStreams(BaseItem item)
