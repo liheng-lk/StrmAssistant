@@ -1,14 +1,32 @@
 using MediaBrowser.Controller.Api;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Querying;
 using MediaBrowser.Model.Services;
 using StrmAssistant.Compatibility;
 using StrmAssistant.Experience;
 using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace StrmAssistant.Api
 {
+    public sealed class ReliabilityInventorySummary
+    {
+        public bool Included { get; set; }
+        public int TotalStrmItems { get; set; }
+        public int CoreMediaInfoComplete { get; set; }
+        public int ValidV3Shadow { get; set; }
+        public int CompleteButMissingShadow { get; set; }
+        public int IncompleteButRecoverable { get; set; }
+        public int PlaybackProbeRisk { get; set; }
+        public int ProtectedByAnyLocalRecoverySource { get; set; }
+        public List<string> PlaybackProbeRiskItemIds { get; set; } = new List<string>();
+    }
+
     public sealed class ReliabilityAuditResult
     {
         public bool Healthy { get; set; }
@@ -17,24 +35,43 @@ namespace StrmAssistant.Api
         public MediaInfoPreReadGuardStatus MediaInfoPreRead { get; set; }
         public MediaInfoPersistenceReliabilityStatus MediaInfoPersistence { get; set; }
         public MediaInfoReliabilityShadowStatus MediaInfoShadow { get; set; }
+        public MediaInfoReliabilityShadowRuntimeStatus MediaInfoShadowCaptureHook { get; set; }
+        public MediaInfoReliabilityShadowUpdateStatus MediaInfoShadowUpdateHook { get; set; }
+        public MediaInfoReliabilitySeedMigrationStatus MediaInfoShadowMigration { get; set; }
+        public ExplicitMediaInfoClearReliabilityStatus ExplicitMediaInfoClearInvalidation { get; set; }
         public RemoteDeepDeleteCapabilityStatus RemoteDeepDelete { get; set; }
+        public OpenListDirectLinkDeepDeleteStatus OpenListDirectLinkBridge { get; set; }
+        public OpenListRemoteSidecarDeleteStatus OpenListSidecars { get; set; }
         public NativeItemDeleteRemoteBridgeStatus NativeDeleteBridge { get; set; }
+        public NativeRemoteDeleteTransactionStatus NativeDeleteTransaction { get; set; }
         public string RemoteProvider { get; set; }
         public string RemoteEndpointHost { get; set; }
         public bool RemoteDeleteEnabled { get; set; }
         public bool RemoteCredentialsConfigured { get; set; }
+        public bool RemoteSidecarsEnabled { get; set; }
         public int RemotePathMappingCount { get; set; }
         public int RemoteAllowedRootCount { get; set; }
+        public ReliabilityInventorySummary Inventory { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
 
     [Route("/StrmAssistant/ReliabilityAudit", "GET",
         Summary = "Audit Strm Assistant runtime reliability capabilities without exposing secrets")]
     [Authenticated(Roles = "Admin")]
-    public sealed class GetReliabilityAudit : IReturn<ReliabilityAuditResult> { }
+    public sealed class GetReliabilityAudit : IReturn<ReliabilityAuditResult>
+    {
+        public bool IncludeInventory { get; set; }
+    }
 
     public sealed class ReliabilityAuditApiService : BaseApiService
     {
+        private readonly ILibraryManager _libraryManager;
+
+        public ReliabilityAuditApiService(ILibraryManager libraryManager)
+        {
+            _libraryManager = libraryManager;
+        }
+
         public object Get(GetReliabilityAudit request)
         {
             var remote = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
@@ -45,8 +82,15 @@ namespace StrmAssistant.Api
                 MediaInfoPreRead = MediaInfoPreReadGuardState.Status,
                 MediaInfoPersistence = MediaInfoPersistenceReliabilityState.Status,
                 MediaInfoShadow = MediaInfoReliabilityShadowStore.Status,
+                MediaInfoShadowCaptureHook = MediaInfoReliabilityShadowRuntimeState.Status,
+                MediaInfoShadowUpdateHook = MediaInfoReliabilityShadowUpdateState.Status,
+                MediaInfoShadowMigration = MediaInfoReliabilitySeedMigrationState.Status,
+                ExplicitMediaInfoClearInvalidation = ExplicitMediaInfoClearReliabilityState.Status,
                 RemoteDeepDelete = RemoteDeepDeleteModState.Status,
+                OpenListDirectLinkBridge = OpenListDirectLinkDeepDeleteState.Status,
+                OpenListSidecars = OpenListRemoteSidecarDeleteState.Status,
                 NativeDeleteBridge = NativeItemDeleteRemoteBridgeState.Status,
+                NativeDeleteTransaction = NativeRemoteDeleteTransactionState.Status,
                 RemoteProvider = remote.Provider.ToString(),
                 RemoteDeleteEnabled = remote.Enabled,
                 RemoteEndpointHost = SafeHost(remote.BaseUrl),
@@ -54,8 +98,12 @@ namespace StrmAssistant.Api
                     ? !string.IsNullOrWhiteSpace(remote.AccessToken)
                     : remote.Provider == RemoteDeepDeleteProviderType.WebDav &&
                       (!string.IsNullOrWhiteSpace(remote.Username) || !string.IsNullOrEmpty(remote.Password)),
+                RemoteSidecarsEnabled = remote.DeleteAssociatedSidecars,
                 RemotePathMappingCount = RemoteDeepDeleteRuntimeSettings.ParseMappings(remote.PathMappings).Count,
-                RemoteAllowedRootCount = RemoteDeepDeleteRuntimeSettings.ParseAllowedRoots(remote.AllowedRemoteRoots).Count
+                RemoteAllowedRootCount = RemoteDeepDeleteRuntimeSettings.ParseAllowedRoots(remote.AllowedRemoteRoots).Count,
+                Inventory = request?.IncludeInventory == true
+                    ? BuildInventory()
+                    : new ReliabilityInventorySummary { Included = false }
             };
 
             if (result.MediaInfoPreRead?.MediaSourceTargetsPatched <= 0)
@@ -64,6 +112,12 @@ namespace StrmAssistant.Api
                 result.Warnings.Add("MediaInfo pre-read: " + result.MediaInfoPreRead.Error);
             if (!string.IsNullOrWhiteSpace(result.MediaInfoPersistence?.Error))
                 result.Warnings.Add("MediaInfo persistence: " + result.MediaInfoPersistence.Error);
+            if (result.MediaInfoShadowCaptureHook?.SaveMediaStreamsTargetsPatched <= 0)
+                result.Warnings.Add("No SaveMediaStreams STRM shadow capture hook is active.");
+            if (result.MediaInfoShadowUpdateHook?.UpdateItemsTargetsPatched <= 0)
+                result.Warnings.Add("No UpdateItems STRM shadow completion hook is active.");
+            if (!string.IsNullOrWhiteSpace(result.MediaInfoShadowMigration?.Error))
+                result.Warnings.Add("STRM shadow schema migration: " + result.MediaInfoShadowMigration.Error);
 
             if (remote.Enabled)
             {
@@ -77,18 +131,76 @@ namespace StrmAssistant.Api
                     result.Warnings.Add("Remote provider credentials are not configured.");
                 if (result.RemoteDeepDelete?.DirectApiIntegration != true)
                     result.Warnings.Add("Direct remote deep-delete API integration is not active.");
+                if (result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched <= 0)
+                    result.Warnings.Add("No native single-item Emby delete route is bridged to remote deletion.");
+                if (remote.DeleteAssociatedSidecars && remote.Provider != RemoteDeepDeleteProviderType.OpenList)
+                    result.Warnings.Add("Remote sidecar cleanup is enabled but currently implemented only for OpenList.");
+                if (remote.DeleteAssociatedSidecars && result.OpenListSidecars?.ExecuteAsyncPatched != true)
+                    result.Warnings.Add("OpenList sidecar cleanup is enabled but its ExecuteAsync transaction extension is inactive.");
+            }
+
+            if (result.NativeDeleteTransaction?.LocalDeletesFailedAfterRemoteSuccess > 0 ||
+                result.NativeDeleteTransaction?.LocalItemsStillPresentAfterRemoteSuccess > 0)
+                result.Warnings.Add("An irreversible remote-success/local-delete failure has previously been observed. Inspect NativeDeleteTransaction.");
+
+            if (result.Inventory?.Included == true)
+            {
+                if (result.Inventory.PlaybackProbeRisk > 0)
+                    result.Warnings.Add(result.Inventory.PlaybackProbeRisk +
+                                        " STRM items currently have incomplete core MediaInfo and no validated local recovery source; these may require a remote probe on playback.");
+                if (result.Inventory.CompleteButMissingShadow > 0)
+                    result.Warnings.Add(result.Inventory.CompleteButMissingShadow +
+                                        " complete STRM items are not yet protected by a valid schema-v3 shadow.");
             }
 
             result.Healthy = result.MediaInfoPreRead?.MediaSourceTargetsPatched > 0 &&
                              string.IsNullOrWhiteSpace(result.MediaInfoPreRead?.Error) &&
                              string.IsNullOrWhiteSpace(result.MediaInfoPersistence?.Error) &&
+                             (result.Inventory?.Included != true || result.Inventory.PlaybackProbeRisk == 0) &&
                              (!remote.Enabled ||
                               (remote.Provider != RemoteDeepDeleteProviderType.None &&
                                !string.IsNullOrWhiteSpace(remote.BaseUrl) &&
                                result.RemoteAllowedRootCount > 0 &&
                                result.RemoteCredentialsConfigured &&
-                               result.RemoteDeepDelete?.DirectApiIntegration == true));
+                               result.RemoteDeepDelete?.DirectApiIntegration == true &&
+                               result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched > 0));
             return result;
+        }
+
+        private ReliabilityInventorySummary BuildInventory()
+        {
+            var summary = new ReliabilityInventorySummary { Included = true };
+            var items = _libraryManager.GetItemList(new InternalItemsQuery
+            {
+                HasPath = true,
+                MediaTypes = new[] { MediaType.Video, MediaType.Audio }
+            }) ?? Array.Empty<BaseItem>();
+
+            foreach (var item in items
+                         .Where(MediaInfoReliabilityShadowStore.AppliesTo)
+                         .GroupBy(candidate => candidate.InternalId)
+                         .Select(group => group.First()))
+            {
+                summary.TotalStrmItems++;
+                var assessment = MediaInfoIntegrityService.Assess(item);
+                var coreComplete = assessment?.CoreMediaInfoComplete == true;
+                var shadowValid = MediaInfoReliabilityShadowStore.Exists(item);
+                var recoverable = assessment?.Recoverable == true || shadowValid;
+
+                if (coreComplete) summary.CoreMediaInfoComplete++;
+                if (shadowValid) summary.ValidV3Shadow++;
+                if (coreComplete && !shadowValid) summary.CompleteButMissingShadow++;
+                if (!coreComplete && recoverable) summary.IncompleteButRecoverable++;
+                if (recoverable) summary.ProtectedByAnyLocalRecoverySource++;
+
+                if (!coreComplete && !recoverable)
+                {
+                    summary.PlaybackProbeRisk++;
+                    if (summary.PlaybackProbeRiskItemIds.Count < 20)
+                        summary.PlaybackProbeRiskItemIds.Add(item.InternalId.ToString());
+                }
+            }
+            return summary;
         }
 
         private static string SafeHost(string baseUrl)
