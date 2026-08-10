@@ -39,37 +39,19 @@ namespace StrmAssistant.Api
         public MediaInfoIntegrityAssessment MediaInfo { get; set; }
         public MediaInfoPreReadGuardStatus MediaInfoPreReadGuard { get; set; }
         public MediaInfoPersistenceReliabilityStatus MediaInfoPersistenceGuard { get; set; }
+        public MediaInfoReliabilityShadowStatus MediaInfoShadow { get; set; }
+        public MediaInfoReliabilityShadowRuntimeStatus MediaInfoShadowCaptureHook { get; set; }
         public RemoteDeleteReliabilitySummary RemoteDelete { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
 
-    public sealed class MediaInfoReliabilityRepairResult
-    {
-        public bool Success { get; set; }
-        public bool Executed { get; set; }
-        public string ItemId { get; set; }
-        public MediaInfoIntegrityAssessment Before { get; set; }
-        public MediaInfoIntegrityAssessment After { get; set; }
-        public string Error { get; set; }
-        public List<string> Warnings { get; set; } = new List<string>();
-    }
-
     [Route("/StrmAssistant/Reliability/{Id}", "GET",
-        Summary = "Inspect MediaInfo persistence and remote deep-delete reliability for one item")]
+        Summary = "Inspect MediaInfo and remote deep-delete reliability for one item")]
     [Authenticated(Roles = "Admin")]
     public sealed class GetItemReliabilityReport : IReturn<ItemReliabilityReport>
     {
         public string Id { get; set; }
         public bool ProbeRemote { get; set; }
-    }
-
-    [Route("/StrmAssistant/Reliability/{Id}/MediaInfo/Repair", "POST",
-        Summary = "Explicitly restore missing core MediaInfo from a validated persisted snapshot")]
-    [Authenticated(Roles = "Admin")]
-    public sealed class RepairItemMediaInfo : IReturn<MediaInfoReliabilityRepairResult>
-    {
-        public string Id { get; set; }
-        public bool Confirm { get; set; }
     }
 
     public sealed class ReliabilityDiagnosticsApiService : BaseApiService
@@ -91,9 +73,7 @@ namespace StrmAssistant.Api
             var remotePlan = _remoteDeepDelete.BuildPlan(item);
             RemoteDeepDeleteProbeResult probe = null;
             if (request?.ProbeRemote == true && remotePlan?.Applicable == true && remotePlan.Allowed)
-            {
                 probe = await _remoteDeepDelete.ProbeAsync(remotePlan, CancellationToken.None).ConfigureAwait(false);
-            }
 
             var report = new ItemReliabilityReport
             {
@@ -104,6 +84,8 @@ namespace StrmAssistant.Api
                 MediaInfo = MediaInfoIntegrityService.Assess(item),
                 MediaInfoPreReadGuard = MediaInfoPreReadGuardState.Status,
                 MediaInfoPersistenceGuard = MediaInfoPersistenceReliabilityState.Status,
+                MediaInfoShadow = MediaInfoReliabilityShadowStore.Status,
+                MediaInfoShadowCaptureHook = MediaInfoReliabilityShadowRuntimeState.Status,
                 RemoteDelete = new RemoteDeleteReliabilitySummary
                 {
                     Enabled = remoteOptions.Enabled,
@@ -121,10 +103,14 @@ namespace StrmAssistant.Api
                 }
             };
 
-            if (report.MediaInfo?.PlaybackProbeRisk == true && report.MediaInfo.Recoverable)
-                report.Warnings.Add("Core MediaInfo is currently incomplete, but a validated snapshot is available. Playback should be repaired before a new probe is allowed to become necessary.");
-            if (report.MediaInfo?.PlaybackProbeRisk == true && !report.MediaInfo.Recoverable)
-                report.Warnings.Add("Core MediaInfo is incomplete and no validated snapshot exists. One explicit extraction is still required before future loss can be recovered.");
+            if (report.MediaInfo?.CoreMediaInfoComplete == false && report.MediaInfo.Recoverable)
+                report.Warnings.Add("Core MediaInfo is incomplete, but a validated local snapshot/shadow is available; the playback pre-read guard should hydrate it without probing the remote media.");
+            if (report.MediaInfo?.PlaybackProbeRisk == true)
+                report.Warnings.Add("Core MediaInfo is incomplete and no validated local recovery source exists. One explicit MediaInfo extraction is required before this item can be protected from future loss.");
+            if (report.MediaInfoPreReadGuard?.MediaSourceTargetsPatched <= 0)
+                report.Warnings.Add("No playback/static MediaSourceManager pre-read target is active; recoverable MediaInfo may not be hydrated before playback.");
+            if (report.MediaInfoShadowCaptureHook?.SaveMediaStreamsTargetsPatched <= 0)
+                report.Warnings.Add("No SaveMediaStreams capture hook is active; newly extracted STRM MediaInfo may not be copied into the reliability shadow automatically.");
             if (remoteOptions.Enabled && remotePlan?.Applicable == true && !remotePlan.Allowed)
                 report.Warnings.Add("The item resolves to a remote target, but the remote deletion plan is blocked: " + remotePlan.Error);
             if (remoteOptions.Enabled && NativeItemDeleteRemoteBridgeState.Status?.ExplicitDeleteTargetsPatched == 0)
@@ -133,64 +119,6 @@ namespace StrmAssistant.Api
                 report.Warnings.Add("Remote target probe failed: " + probe.Error);
 
             return report;
-        }
-
-        public object Post(RepairItemMediaInfo request)
-        {
-            var item = ResolveItem(request?.Id);
-            if (item == null)
-                return new MediaInfoReliabilityRepairResult
-                {
-                    Success = false,
-                    ItemId = request?.Id,
-                    Error = "Media item was not found."
-                };
-
-            var result = new MediaInfoReliabilityRepairResult
-            {
-                ItemId = item.InternalId.ToString(),
-                Before = MediaInfoIntegrityService.Assess(item)
-            };
-
-            if (request?.Confirm != true)
-            {
-                result.Warnings.Add("Repair was not executed. Review Before and set Confirm=true.");
-                return result;
-            }
-
-            if (result.Before.CoreMediaInfoComplete)
-            {
-                result.Success = true;
-                result.Warnings.Add("Core MediaInfo is already complete; no write was necessary.");
-                result.After = result.Before;
-                return result;
-            }
-
-            if (!result.Before.Recoverable)
-            {
-                result.Error = "No validated primary or backup MediaInfo snapshot is available for this item.";
-                result.After = result.Before;
-                return result;
-            }
-
-            try
-            {
-                result.Executed = true;
-                MediaInfoIntegrityService.RepairPrimaryFromBackupIfNeeded(item);
-                result.Success = MediaInfoIntegrityService.HydrateCore(item, "Explicit Reliability Repair");
-                var fresh = _libraryManager.GetItemById(item.InternalId) ?? item;
-                result.After = MediaInfoIntegrityService.Assess(fresh);
-                if (!result.Success && result.After.CoreMediaInfoComplete) result.Success = true;
-                if (!result.Success)
-                    result.Error = "A validated snapshot existed, but core MediaInfo could not be hydrated into the Emby item repository.";
-            }
-            catch (Exception ex)
-            {
-                result.Error = ex.GetBaseException().Message;
-                result.After = MediaInfoIntegrityService.Assess(_libraryManager.GetItemById(item.InternalId) ?? item);
-            }
-
-            return result;
         }
 
         private BaseItem ResolveItem(string id)
