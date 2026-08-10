@@ -6,6 +6,7 @@ using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Events;
 using MediaBrowser.Model.Querying;
+using StrmAssistant.Compatibility;
 using StrmAssistant.Options;
 using System;
 using System.Collections.Concurrent;
@@ -20,6 +21,7 @@ namespace StrmAssistant.MediaEnhance
     /// Repairs MediaInfo after provider refreshes that leave runtime/streams incomplete. Two local
     /// sources are supported: the user's optional persisted MediaInfo JSON/.bak and the plugin-owned
     /// STRM reliability shadow store. Neither recovery path invokes ffprobe or the remote media URL.
+    /// Shadow writes are queued so refresh/playback callers do not serialize files inline.
     /// </summary>
     public sealed class MediaInfoIntegrityMonitor : IServerEntryPoint
     {
@@ -54,7 +56,7 @@ namespace StrmAssistant.MediaEnhance
             if (MediaInfoReliabilityShadowStore.AppliesTo(item) &&
                 MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
             {
-                MediaInfoReliabilityShadowStore.Capture(item);
+                MediaInfoReliabilityShadowPatches.QueueCapture(item.InternalId);
                 return;
             }
 
@@ -120,7 +122,8 @@ namespace StrmAssistant.MediaEnhance
             if (canUsePersisted && MediaInfoIntegrityService.HydrateCore(item, source + " Persisted"))
             {
                 var fresh = Plugin.Instance.ApplicationHost.Resolve<ILibraryManager>()?.GetItemById(item.InternalId) ?? item;
-                MediaInfoReliabilityShadowStore.Capture(fresh, true);
+                if (MediaInfoReliabilityShadowStore.AppliesTo(fresh))
+                    MediaInfoReliabilityShadowPatches.QueueCapture(fresh.InternalId);
                 return Task.FromResult(true);
             }
 
