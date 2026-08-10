@@ -31,8 +31,10 @@ namespace StrmAssistant.Api
         public long StaticMediaSourceMilliseconds { get; set; }
         public int StaticMediaSourceCount { get; set; }
         public bool PlaybackHydrationPatchActive { get; set; }
+        public int PlaybackHydrationPatchedTargets { get; set; }
         public long PlaybackHydrationAttempts { get; set; }
         public long PlaybackHydrationSucceeded { get; set; }
+        public long ExternalTrackWritesBlocked { get; set; }
         public string ProbeRiskReason { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
@@ -152,10 +154,12 @@ namespace StrmAssistant.Api
                 result.Warnings.Add("Static media source inspection failed: " + ex.Message);
             }
 
-            var hydration = MediaInfoPlaybackHydrationState.Status;
-            result.PlaybackHydrationPatchActive = hydration?.Patched == true;
-            result.PlaybackHydrationAttempts = hydration?.HydrationAttempts ?? 0;
-            result.PlaybackHydrationSucceeded = hydration?.HydrationSucceeded ?? 0;
+            var hydration = MediaInfoPreReadGuardState.Status;
+            result.PlaybackHydrationPatchedTargets = hydration?.MediaSourceTargetsPatched ?? 0;
+            result.PlaybackHydrationPatchActive = result.PlaybackHydrationPatchedTargets > 0;
+            result.PlaybackHydrationAttempts = hydration?.PreReadRestoreAttempts ?? 0;
+            result.PlaybackHydrationSucceeded = hydration?.PreReadRestoreSucceeded ?? 0;
+            result.ExternalTrackWritesBlocked = hydration?.ExternalTrackWritesBlocked ?? 0;
 
             if (result.Integrity.CoreMediaInfoComplete)
                 result.ProbeRiskReason = "Core MediaInfo is already present.";
@@ -167,7 +171,7 @@ namespace StrmAssistant.Api
                 result.ProbeRiskReason = "Core MediaInfo and valid persisted snapshots are both missing; an Emby media probe may be required.";
 
             if (result.StaticMediaSourceMilliseconds > 500)
-                result.Warnings.Add("Building static media sources exceeded 500 ms even without an explicit probe; inspect path/mount latency.");
+                result.Warnings.Add("Building static media sources exceeded 500 ms even without an explicit probe; inspect STRM resolution/mount latency.");
             return result;
         }
 
