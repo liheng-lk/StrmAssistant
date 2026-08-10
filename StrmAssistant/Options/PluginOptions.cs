@@ -83,6 +83,19 @@ namespace StrmAssistant.Options
                         ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.OpenList &&
                     string.IsNullOrWhiteSpace(experience.RemoteDeepDeleteAccessToken))
                     context.AddValidationError("OpenList 远程删除需要 Access Token。");
+
+                if (experience.RemoteDeepDeleteAssociatedFiles &&
+                    experience.RemoteDeepDeleteProvider != ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.OpenList)
+                    context.AddValidationError("“删除 OpenList 远端关联文件”只能与 OpenList 远程删除提供方一起使用。");
+
+                if (experience.RemoteDeepDeleteAssociatedFiles &&
+                    !experience.RemoteDeepDeleteTreatNotFoundAsSuccess)
+                    context.AddValidationError(
+                        "启用“删除 OpenList 远端关联文件”时必须开启“远端对象已不存在时视为成功”，否则主文件已删除后的半完成事务无法安全重试。");
+            }
+            else if (experience?.RemoteDeepDeleteAssociatedFiles == true)
+            {
+                context.AddValidationError("启用“删除 OpenList 远端关联文件”前必须先启用“远程/网盘深度删除”。");
             }
         }
     }
