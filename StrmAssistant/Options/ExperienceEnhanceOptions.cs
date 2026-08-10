@@ -154,6 +154,9 @@ namespace StrmAssistant.Options
         [VisibleCondition(nameof(EnableRemoteDeepDelete), SimpleCondition.IsTrue)]
         public bool RemoteDeepDeleteAssociatedFiles { get; set; } = false;
 
+        [Browsable(false)]
+        public bool RemoteDeepDeleteUiAuthoritative { get; set; } = false;
+
         [DisplayName("隐藏合集媒体库")]
         [Description("将 Emby 的 BoxSets/合集顶级媒体库加入所有用户的 MyMediaExcludes，仅从用户界面隐藏，不删除合集和刮削配置。关闭后只撤销由本插件添加的隐藏项。")]
         [Required]
