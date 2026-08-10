@@ -28,11 +28,6 @@ namespace StrmAssistant.Compatibility
             new MediaInfoReliabilityShadowRuntimeStatus();
     }
 
-    /// <summary>
-    /// Captures STRM reliability shadows after MediaStreams are persisted. The post-save hook only
-    /// enqueues an ItemId; one bounded timer drains a small deduplicated batch. This avoids creating
-    /// thousands of delayed Tasks during a large library extraction/scan.
-    /// </summary>
     public sealed class MediaInfoReliabilityShadowEntryPoint : IServerEntryPoint
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.mediainfo-shadow";
@@ -110,6 +105,7 @@ namespace StrmAssistant.Compatibility
         private static readonly object TimerSync = new object();
         private static Timer _timer;
         private static int _draining;
+        private static int _pendingCount;
 
         public static void Start()
         {
@@ -127,6 +123,7 @@ namespace StrmAssistant.Compatibility
                 try { _timer?.Dispose(); } catch { }
                 _timer = null;
                 Pending.Clear();
+                Interlocked.Exchange(ref _pendingCount, 0);
                 MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = 0;
             }
         }
@@ -144,9 +141,16 @@ namespace StrmAssistant.Compatibility
                 if (!MediaInfoReliabilityShadowStore.AppliesTo(item)) return;
 
                 var isNew = Pending.TryAdd(itemId, DateTimeOffset.UtcNow);
-                if (!isNew) Pending[itemId] = DateTimeOffset.UtcNow;
-                if (isNew) MediaInfoReliabilityShadowRuntimeState.Status.DeferredCapturesScheduled++;
-                MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = Pending.Count;
+                if (!isNew)
+                {
+                    Pending[itemId] = DateTimeOffset.UtcNow;
+                }
+                else
+                {
+                    Interlocked.Increment(ref _pendingCount);
+                    MediaInfoReliabilityShadowRuntimeState.Status.DeferredCapturesScheduled++;
+                }
+                MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = Volatile.Read(ref _pendingCount);
             }
             catch (Exception ex)
             {
@@ -172,6 +176,7 @@ namespace StrmAssistant.Compatibility
                 foreach (var itemId in ready)
                 {
                     if (!Pending.TryRemove(itemId, out _)) continue;
+                    Interlocked.Decrement(ref _pendingCount);
                     try
                     {
                         var item = libraryManager?.GetItemById(itemId);
@@ -192,7 +197,7 @@ namespace StrmAssistant.Compatibility
             }
             finally
             {
-                MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = Pending.Count;
+                MediaInfoReliabilityShadowRuntimeState.Status.PendingCaptureCount = Volatile.Read(ref _pendingCount);
                 Volatile.Write(ref _draining, 0);
             }
         }
