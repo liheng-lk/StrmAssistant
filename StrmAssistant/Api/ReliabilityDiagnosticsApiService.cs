@@ -28,6 +28,7 @@ namespace StrmAssistant.Api
         public RemoteDeepDeleteProbeResult Probe { get; set; }
         public OpenListDirectLinkDeepDeleteStatus OpenListDirectLinkBridge { get; set; }
         public NativeItemDeleteRemoteBridgeStatus NativeDeleteBridge { get; set; }
+        public NativeRemoteDeleteTransactionStatus NativeDeleteTransaction { get; set; }
     }
 
     public sealed class ItemReliabilityReport
@@ -37,10 +38,13 @@ namespace StrmAssistant.Api
         public string ItemName { get; set; }
         public string ItemPath { get; set; }
         public MediaInfoIntegrityAssessment MediaInfo { get; set; }
+        public bool ShadowApplicable { get; set; }
+        public bool ShadowValidForCurrentStrmTarget { get; set; }
         public MediaInfoPreReadGuardStatus MediaInfoPreReadGuard { get; set; }
         public MediaInfoPersistenceReliabilityStatus MediaInfoPersistenceGuard { get; set; }
         public MediaInfoReliabilityShadowStatus MediaInfoShadow { get; set; }
         public MediaInfoReliabilityShadowRuntimeStatus MediaInfoShadowCaptureHook { get; set; }
+        public MediaInfoReliabilityShadowUpdateStatus MediaInfoShadowUpdateHook { get; set; }
         public RemoteDeleteReliabilitySummary RemoteDelete { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
     }
@@ -75,6 +79,8 @@ namespace StrmAssistant.Api
             if (request?.ProbeRemote == true && remotePlan?.Applicable == true && remotePlan.Allowed)
                 probe = await _remoteDeepDelete.ProbeAsync(remotePlan, CancellationToken.None).ConfigureAwait(false);
 
+            var shadowApplicable = MediaInfoReliabilityShadowStore.AppliesTo(item);
+            var shadowValid = shadowApplicable && MediaInfoReliabilityShadowStore.Exists(item);
             var report = new ItemReliabilityReport
             {
                 GeneratedUtc = DateTimeOffset.UtcNow.ToString("O"),
@@ -82,10 +88,13 @@ namespace StrmAssistant.Api
                 ItemName = item.Name,
                 ItemPath = item.Path,
                 MediaInfo = MediaInfoIntegrityService.Assess(item),
+                ShadowApplicable = shadowApplicable,
+                ShadowValidForCurrentStrmTarget = shadowValid,
                 MediaInfoPreReadGuard = MediaInfoPreReadGuardState.Status,
                 MediaInfoPersistenceGuard = MediaInfoPersistenceReliabilityState.Status,
                 MediaInfoShadow = MediaInfoReliabilityShadowStore.Status,
                 MediaInfoShadowCaptureHook = MediaInfoReliabilityShadowRuntimeState.Status,
+                MediaInfoShadowUpdateHook = MediaInfoReliabilityShadowUpdateState.Status,
                 RemoteDelete = new RemoteDeleteReliabilitySummary
                 {
                     Enabled = remoteOptions.Enabled,
@@ -99,7 +108,8 @@ namespace StrmAssistant.Api
                     Plan = remotePlan,
                     Probe = probe,
                     OpenListDirectLinkBridge = OpenListDirectLinkDeepDeleteState.Status,
-                    NativeDeleteBridge = NativeItemDeleteRemoteBridgeState.Status
+                    NativeDeleteBridge = NativeItemDeleteRemoteBridgeState.Status,
+                    NativeDeleteTransaction = NativeRemoteDeleteTransactionState.Status
                 }
             };
 
@@ -107,16 +117,27 @@ namespace StrmAssistant.Api
                 report.Warnings.Add("Core MediaInfo is incomplete, but a validated local snapshot/shadow is available; the playback pre-read guard should hydrate it without probing the remote media.");
             if (report.MediaInfo?.PlaybackProbeRisk == true)
                 report.Warnings.Add("Core MediaInfo is incomplete and no validated local recovery source exists. One explicit MediaInfo extraction is required before this item can be protected from future loss.");
+            if (shadowApplicable && report.MediaInfo?.CoreMediaInfoComplete == true && !shadowValid)
+                report.Warnings.Add("This STRM currently has complete MediaInfo but no valid reliability shadow for its current target. Startup seeding or the next successful MediaInfo update should create one.");
             if (report.MediaInfoPreReadGuard?.MediaSourceTargetsPatched <= 0)
                 report.Warnings.Add("No playback/static MediaSourceManager pre-read target is active; recoverable MediaInfo may not be hydrated before playback.");
             if (report.MediaInfoShadowCaptureHook?.SaveMediaStreamsTargetsPatched <= 0)
                 report.Warnings.Add("No SaveMediaStreams capture hook is active; newly extracted STRM MediaInfo may not be copied into the reliability shadow automatically.");
+            if (report.MediaInfoShadowUpdateHook?.UpdateItemsTargetsPatched <= 0)
+                report.Warnings.Add("No UpdateItems shadow capture hook is active; a MediaInfo transaction that writes streams before runtime/container fields may miss automatic shadow capture.");
             if (remoteOptions.Enabled && remotePlan?.Applicable == true && !remotePlan.Allowed)
                 report.Warnings.Add("The item resolves to a remote target, but the remote deletion plan is blocked: " + remotePlan.Error);
             if (remoteOptions.Enabled && NativeItemDeleteRemoteBridgeState.Status?.ExplicitDeleteTargetsPatched == 0)
                 report.Warnings.Add("Remote Deep Delete is enabled, but no native Emby single-item delete route is currently patched. Use the plugin Deep Delete API until the runtime target is resolved.");
             if (request?.ProbeRemote == true && probe != null && !probe.Success)
                 report.Warnings.Add("Remote target probe failed: " + probe.Error);
+
+            var transaction = NativeRemoteDeleteTransactionState.Status;
+            if (transaction?.LocalDeletesFailedAfterRemoteSuccess > 0 ||
+                transaction?.LocalItemsStillPresentAfterRemoteSuccess > 0)
+            {
+                report.Warnings.Add("A previous native delete reached an irreversible partial state: the remote target was deleted but the local Emby deletion failed or the item remained. Inspect NativeDeleteTransaction immediately.");
+            }
 
             return report;
         }
