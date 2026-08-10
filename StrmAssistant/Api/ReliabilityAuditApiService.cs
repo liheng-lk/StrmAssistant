@@ -43,6 +43,8 @@ namespace StrmAssistant.Api
         public ExplicitMediaInfoClearReliabilityStatus ExplicitMediaInfoClearInvalidation { get; set; }
         public RemoteDeepDeleteCapabilityStatus RemoteDeepDelete { get; set; }
         public RemoteDeepDeleteProbeSafetyStatus RemoteProbeSafety { get; set; }
+        public RemoteDeepDeletePlanSafetyStatus RemotePlanSafety { get; set; }
+        public RemoteDeepDeleteUiAuthorityStatus RemoteUiAuthority { get; set; }
         public OpenListDirectLinkDeepDeleteStatus OpenListDirectLinkBridge { get; set; }
         public OpenListRemoteSidecarDeleteStatus OpenListSidecars { get; set; }
         public NativeItemDeleteRemoteBridgeStatus NativeDeleteBridge { get; set; }
@@ -52,6 +54,7 @@ namespace StrmAssistant.Api
         public bool RemoteDeleteEnabled { get; set; }
         public bool RemoteCredentialsConfigured { get; set; }
         public bool RemoteSidecarsEnabled { get; set; }
+        public bool RemoteUiIsAuthoritative { get; set; }
         public int RemotePathMappingCount { get; set; }
         public int RemoteAllowedRootCount { get; set; }
         public ReliabilityInventorySummary Inventory { get; set; }
@@ -78,6 +81,7 @@ namespace StrmAssistant.Api
         public object Get(GetReliabilityAudit request)
         {
             var remote = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
+            var ui = Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions;
             var result = new ReliabilityAuditResult
             {
                 PluginVersion = Plugin.Instance?.Version?.ToString(),
@@ -91,6 +95,8 @@ namespace StrmAssistant.Api
                 ExplicitMediaInfoClearInvalidation = ExplicitMediaInfoClearReliabilityState.Status,
                 RemoteDeepDelete = RemoteDeepDeleteModState.Status,
                 RemoteProbeSafety = RemoteDeepDeleteProbeSafetyState.Status,
+                RemotePlanSafety = RemoteDeepDeletePlanSafetyState.Status,
+                RemoteUiAuthority = RemoteDeepDeleteUiAuthorityState.Status,
                 OpenListDirectLinkBridge = OpenListDirectLinkDeepDeleteState.Status,
                 OpenListSidecars = OpenListRemoteSidecarDeleteState.Status,
                 NativeDeleteBridge = NativeItemDeleteRemoteBridgeState.Status,
@@ -103,6 +109,7 @@ namespace StrmAssistant.Api
                     : remote.Provider == RemoteDeepDeleteProviderType.WebDav &&
                       (!string.IsNullOrWhiteSpace(remote.Username) || !string.IsNullOrEmpty(remote.Password)),
                 RemoteSidecarsEnabled = remote.DeleteAssociatedSidecars,
+                RemoteUiIsAuthoritative = ui?.RemoteDeepDeleteUiAuthoritative == true,
                 RemotePathMappingCount = RemoteDeepDeleteRuntimeSettings.ParseMappings(remote.PathMappings).Count,
                 RemoteAllowedRootCount = RemoteDeepDeleteRuntimeSettings.ParseAllowedRoots(remote.AllowedRemoteRoots).Count,
                 Inventory = request?.IncludeInventory == true
@@ -140,8 +147,12 @@ namespace StrmAssistant.Api
                     result.Warnings.Add("Direct remote deep-delete API integration is not active.");
                 if (result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched <= 0)
                     result.Warnings.Add("No native single-item Emby delete route is bridged to remote deletion.");
+                if (result.RemotePlanSafety?.Patched != true)
+                    result.Warnings.Add("Remote destructive mapping path-boundary safety is inactive.");
                 if (remote.Provider == RemoteDeepDeleteProviderType.OpenList && result.RemoteProbeSafety?.Patched != true)
                     result.Warnings.Add("OpenList remote deletion is enabled but structured probe-result safety normalization is inactive.");
+                if (result.RemoteUiIsAuthoritative && result.RemoteUiAuthority?.Patched != true)
+                    result.Warnings.Add("The main remote-delete UI is authoritative, but its legacy-config resurrection guard is inactive.");
                 if (remote.DeleteAssociatedSidecars && remote.Provider != RemoteDeepDeleteProviderType.OpenList)
                     result.Warnings.Add("Remote sidecar cleanup is enabled but currently implemented only for OpenList.");
                 if (remote.DeleteAssociatedSidecars && !remote.TreatNotFoundAsSuccess)
@@ -171,6 +182,8 @@ namespace StrmAssistant.Api
                                  result.RemoteCredentialsConfigured &&
                                  result.RemoteDeepDelete?.DirectApiIntegration == true &&
                                  result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched > 0 &&
+                                 result.RemotePlanSafety?.Patched == true &&
+                                 (!result.RemoteUiIsAuthoritative || result.RemoteUiAuthority?.Patched == true) &&
                                  (remote.Provider != RemoteDeepDeleteProviderType.OpenList ||
                                   result.RemoteProbeSafety?.Patched == true) &&
                                  (!remote.DeleteAssociatedSidecars ||
