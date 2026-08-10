@@ -17,6 +17,7 @@ namespace StrmAssistant.Experience
     {
         public bool Applicable { get; set; }
         public bool Allowed { get; set; }
+        public bool TargetLooksRemote { get; set; }
         public string Provider { get; set; }
         public string SourceTarget { get; set; }
         public string MatchedSourcePrefix { get; set; }
@@ -28,13 +29,29 @@ namespace StrmAssistant.Experience
         public List<string> Warnings { get; set; } = new List<string>();
     }
 
+    public sealed class RemoteDeepDeleteProbeResult
+    {
+        public bool Success { get; set; }
+        public bool Exists { get; set; }
+        public bool Missing { get; set; }
+        public int HttpStatusCode { get; set; }
+        public int? ApiCode { get; set; }
+        public string Provider { get; set; }
+        public string RemotePath { get; set; }
+        public string Error { get; set; }
+    }
+
     public sealed class RemoteDeepDeleteExecutionResult
     {
         public bool Success { get; set; }
+        public bool DeleteAccepted { get; set; }
+        public bool VerifiedDeleted { get; set; }
         public bool AlreadyMissing { get; set; }
         public int HttpStatusCode { get; set; }
+        public int VerificationStatusCode { get; set; }
         public string Provider { get; set; }
         public string RemotePath { get; set; }
+        public string VerificationError { get; set; }
         public string Error { get; set; }
     }
 
@@ -48,17 +65,13 @@ namespace StrmAssistant.Experience
         public RemoteDeepDeletePlan BuildPlan(BaseItem item)
         {
             var options = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
-            var plan = new RemoteDeepDeletePlan
-            {
-                Provider = options.Provider.ToString()
-            };
+            var plan = new RemoteDeepDeletePlan { Provider = options.Provider.ToString() };
 
             if (!options.Enabled || options.Provider == RemoteDeepDeleteProviderType.None)
             {
                 plan.Error = "Remote deep delete is disabled.";
                 return plan;
             }
-
             if (item == null || string.IsNullOrWhiteSpace(item.Path))
             {
                 plan.Error = "The Emby item has no source path.";
@@ -71,21 +84,28 @@ namespace StrmAssistant.Experience
                 plan.Error = "No STRM/symlink target could be resolved.";
                 return plan;
             }
-            plan.SourceTarget = RedactQuery(target);
 
+            plan.SourceTarget = RedactQuery(target);
+            plan.TargetLooksRemote = IsHttpTarget(target);
             var mappings = RemoteDeepDeleteRuntimeSettings.ParseMappings(options.PathMappings);
             var targetWithoutQuery = StripQueryAndFragment(target);
             var mapping = mappings.FirstOrDefault(candidate =>
                 targetWithoutQuery.StartsWith(candidate.SourcePrefix, StringComparison.OrdinalIgnoreCase));
+
             if (mapping == null)
             {
+                // A remote URL must never silently fall through to the local delete path: that was
+                // the old failure mode where the STRM disappeared but the cloud object survived.
+                plan.Applicable = plan.TargetLooksRemote;
                 plan.Error = "The resolved media target did not match any configured remote path mapping.";
+                if (plan.TargetLooksRemote)
+                    plan.Warnings.Add("Remote URL detected. Configure a SourcePrefix => RemoteRoot mapping before destructive execution.");
                 return plan;
             }
 
+            plan.Applicable = true;
             var suffix = targetWithoutQuery.Substring(mapping.SourcePrefix.Length).TrimStart('/', '\\');
-            try { suffix = Uri.UnescapeDataString(suffix); }
-            catch { }
+            try { suffix = Uri.UnescapeDataString(suffix); } catch { }
 
             var remotePath = RemoteDeepDeleteRuntimeSettings.NormalizeRemotePath(
                 mapping.RemoteRoot.TrimEnd('/') + "/" + suffix.Replace('\\', '/'));
@@ -95,7 +115,6 @@ namespace StrmAssistant.Experience
                 return plan;
             }
 
-            plan.Applicable = true;
             plan.MatchedSourcePrefix = mapping.SourcePrefix;
             plan.RemotePath = remotePath;
             plan.RemoteDirectory = PosixDirName(remotePath);
@@ -110,13 +129,11 @@ namespace StrmAssistant.Experience
                     : "The mapped remote path is outside all configured allowed remote roots.";
                 return plan;
             }
-
             if (string.IsNullOrWhiteSpace(options.BaseUrl))
             {
                 plan.Error = "Remote provider BaseUrl is empty or invalid.";
                 return plan;
             }
-
             if (options.Provider == RemoteDeepDeleteProviderType.OpenList &&
                 string.IsNullOrWhiteSpace(options.AccessToken))
             {
@@ -126,8 +143,28 @@ namespace StrmAssistant.Experience
 
             plan.Allowed = true;
             if (item.IsShortcut)
-                plan.Warnings.Add("The STRM file itself will be removed by Emby only after the remote provider confirms deletion.");
+                plan.Warnings.Add("The local STRM/Emby item is removed only after the remote provider deletion is verified.");
             return plan;
+        }
+
+        public async Task<RemoteDeepDeleteProbeResult> ProbeAsync(RemoteDeepDeletePlan plan,
+            CancellationToken cancellationToken)
+        {
+            var options = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
+            if (plan == null || !plan.Applicable || string.IsNullOrWhiteSpace(plan.RemotePath))
+                return ProbeFail(plan, "Remote probe plan is incomplete.");
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
+            switch (options.Provider)
+            {
+                case RemoteDeepDeleteProviderType.OpenList:
+                    return await ProbeOpenListAsync(plan, options, timeout.Token).ConfigureAwait(false);
+                case RemoteDeepDeleteProviderType.WebDav:
+                    return await ProbeWebDavAsync(plan, options, timeout.Token).ConfigureAwait(false);
+                default:
+                    return ProbeFail(plan, "No supported remote provider is selected.");
+            }
         }
 
         public async Task<RemoteDeepDeleteExecutionResult> ExecuteAsync(RemoteDeepDeletePlan plan,
@@ -140,26 +177,45 @@ namespace StrmAssistant.Experience
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
 
+            RemoteDeepDeleteExecutionResult result;
             switch (options.Provider)
             {
                 case RemoteDeepDeleteProviderType.OpenList:
-                    return await ExecuteOpenListAsync(plan, options, timeout.Token).ConfigureAwait(false);
+                    result = await ExecuteOpenListDeleteAsync(plan, options, timeout.Token).ConfigureAwait(false);
+                    break;
                 case RemoteDeepDeleteProviderType.WebDav:
-                    return await ExecuteWebDavAsync(plan, options, timeout.Token).ConfigureAwait(false);
+                    result = await ExecuteWebDavDeleteAsync(plan, options, timeout.Token).ConfigureAwait(false);
+                    break;
                 default:
                     return Fail(plan, "No supported remote delete provider is selected.");
             }
+
+            if (!result.DeleteAccepted) return result;
+
+            // A destructive provider returning 2xx is not sufficient. Verify the object is no
+            // longer visible before deleting the local STRM and Emby library item.
+            var verification = await ProbeAsync(plan, cancellationToken).ConfigureAwait(false);
+            result.VerificationStatusCode = verification.HttpStatusCode;
+            result.VerifiedDeleted = verification.Success && verification.Missing;
+            result.VerificationError = verification.Error;
+            result.Success = result.VerifiedDeleted;
+            if (!result.Success)
+            {
+                result.Error = verification.Success && verification.Exists
+                    ? "Remote provider accepted deletion but the target still exists during verification."
+                    : "Remote deletion could not be verified: " + (verification.Error ?? "unknown verification failure");
+            }
+            return result;
         }
 
-        private static async Task<RemoteDeepDeleteExecutionResult> ExecuteOpenListAsync(RemoteDeepDeletePlan plan,
+        private static async Task<RemoteDeepDeleteExecutionResult> ExecuteOpenListDeleteAsync(RemoteDeepDeletePlan plan,
             RemoteDeepDeleteOptions options, CancellationToken cancellationToken)
         {
             var endpoint = options.BaseUrl.TrimEnd('/') + "/api/fs/remove";
             var body = "{\"dir\":" + JsonString(plan.RemoteDirectory) + ",\"names\":[" +
                        JsonString(plan.RemoteName) + "]}";
-
             using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
-            request.Headers.TryAddWithoutValidation("Authorization", options.AccessToken);
+            AddOpenListAuthorization(request, options.AccessToken);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             request.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
@@ -172,16 +228,16 @@ namespace StrmAssistant.Experience
                 var apiCode = TryReadApiCode(text);
                 var missing = options.TreatNotFoundAsSuccess &&
                               (response.StatusCode == HttpStatusCode.NotFound || LooksMissing(text));
-                var success = (http >= 200 && http < 300 && (!apiCode.HasValue || apiCode.Value == 200)) || missing;
-
+                var accepted = (http >= 200 && http < 300 && (!apiCode.HasValue || apiCode.Value == 200)) || missing;
                 return new RemoteDeepDeleteExecutionResult
                 {
-                    Success = success,
+                    Success = false,
+                    DeleteAccepted = accepted,
                     AlreadyMissing = missing,
                     HttpStatusCode = http,
                     Provider = RemoteDeepDeleteProviderType.OpenList.ToString(),
                     RemotePath = plan.RemotePath,
-                    Error = success ? null : BuildRemoteError(http, apiCode, text)
+                    Error = accepted ? null : BuildRemoteError(http, apiCode, text)
                 };
             }
             catch (OperationCanceledException)
@@ -194,36 +250,32 @@ namespace StrmAssistant.Experience
             }
         }
 
-        private static async Task<RemoteDeepDeleteExecutionResult> ExecuteWebDavAsync(RemoteDeepDeletePlan plan,
+        private static async Task<RemoteDeepDeleteExecutionResult> ExecuteWebDavDeleteAsync(RemoteDeepDeletePlan plan,
             RemoteDeepDeleteOptions options, CancellationToken cancellationToken)
         {
             var endpoint = BuildWebDavUri(options.BaseUrl, plan.RemotePath);
             if (endpoint == null) return Fail(plan, "Unable to build a valid WebDAV target URI.");
-
             using var request = new HttpRequestMessage(HttpMethod.Delete, endpoint);
-            if (!string.IsNullOrEmpty(options.Username) || !string.IsNullOrEmpty(options.Password))
-            {
-                var auth = Convert.ToBase64String(Encoding.UTF8.GetBytes(
-                    (options.Username ?? string.Empty) + ":" + (options.Password ?? string.Empty)));
-                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", auth);
-            }
+            AddWebDavAuthorization(request, options);
 
             try
             {
                 using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseContentRead,
                     cancellationToken).ConfigureAwait(false);
                 var http = (int)response.StatusCode;
-                var missing = options.TreatNotFoundAsSuccess && response.StatusCode == HttpStatusCode.NotFound;
-                var success = (http >= 200 && http < 300) || missing;
-                var body = success ? null : await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var missing = options.TreatNotFoundAsSuccess &&
+                              (response.StatusCode == HttpStatusCode.NotFound || response.StatusCode == HttpStatusCode.Gone);
+                var accepted = (http >= 200 && http < 300) || missing;
+                var body = accepted ? null : await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 return new RemoteDeepDeleteExecutionResult
                 {
-                    Success = success,
+                    Success = false,
+                    DeleteAccepted = accepted,
                     AlreadyMissing = missing,
                     HttpStatusCode = http,
                     Provider = RemoteDeepDeleteProviderType.WebDav.ToString(),
                     RemotePath = plan.RemotePath,
-                    Error = success ? null : "WebDAV DELETE returned HTTP " + http + TruncateBody(body)
+                    Error = accepted ? null : "WebDAV DELETE returned HTTP " + http + TruncateBody(body)
                 };
             }
             catch (OperationCanceledException)
@@ -234,6 +286,140 @@ namespace StrmAssistant.Experience
             {
                 return Fail(plan, "WebDAV delete failed: " + ex.Message);
             }
+        }
+
+        private static async Task<RemoteDeepDeleteProbeResult> ProbeOpenListAsync(RemoteDeepDeletePlan plan,
+            RemoteDeepDeleteOptions options, CancellationToken cancellationToken)
+        {
+            var endpoint = options.BaseUrl.TrimEnd('/') + "/api/fs/get";
+            var body = "{\"path\":" + JsonString(plan.RemotePath) + ",\"password\":\"\"}";
+            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            AddOpenListAuthorization(request, options.AccessToken);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+            try
+            {
+                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseContentRead,
+                    cancellationToken).ConfigureAwait(false);
+                var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var http = (int)response.StatusCode;
+                var apiCode = TryReadApiCode(text);
+                var missing = response.StatusCode == HttpStatusCode.NotFound ||
+                              response.StatusCode == HttpStatusCode.Gone || LooksMissing(text);
+                if (missing)
+                {
+                    return new RemoteDeepDeleteProbeResult
+                    {
+                        Success = true, Missing = true, Exists = false, HttpStatusCode = http,
+                        ApiCode = apiCode, Provider = RemoteDeepDeleteProviderType.OpenList.ToString(),
+                        RemotePath = plan.RemotePath
+                    };
+                }
+                if (http >= 200 && http < 300 && (!apiCode.HasValue || apiCode.Value == 200))
+                {
+                    return new RemoteDeepDeleteProbeResult
+                    {
+                        Success = true, Missing = false, Exists = true, HttpStatusCode = http,
+                        ApiCode = apiCode, Provider = RemoteDeepDeleteProviderType.OpenList.ToString(),
+                        RemotePath = plan.RemotePath
+                    };
+                }
+                return ProbeFail(plan, "OpenList /api/fs/get returned HTTP " + http +
+                                       (apiCode.HasValue ? ", API code " + apiCode.Value : string.Empty) +
+                                       TruncateBody(text), http, apiCode);
+            }
+            catch (OperationCanceledException)
+            {
+                return ProbeFail(plan, "OpenList verification timed out or was cancelled.");
+            }
+            catch (Exception ex)
+            {
+                return ProbeFail(plan, "OpenList verification failed: " + ex.Message);
+            }
+        }
+
+        private static async Task<RemoteDeepDeleteProbeResult> ProbeWebDavAsync(RemoteDeepDeletePlan plan,
+            RemoteDeepDeleteOptions options, CancellationToken cancellationToken)
+        {
+            var endpoint = BuildWebDavUri(options.BaseUrl, plan.RemotePath);
+            if (endpoint == null) return ProbeFail(plan, "Unable to build a valid WebDAV target URI.");
+
+            var head = await SendWebDavProbeAsync(HttpMethod.Head, endpoint, options, cancellationToken)
+                .ConfigureAwait(false);
+            if (head.StatusCode == (int)HttpStatusCode.MethodNotAllowed || head.StatusCode == 501)
+            {
+                var propFind = new HttpMethod("PROPFIND");
+                return await SendWebDavProbeAsync(propFind, endpoint, options, cancellationToken, true)
+                    .ConfigureAwait(false);
+            }
+            return head;
+        }
+
+        private static async Task<RemoteDeepDeleteProbeResult> SendWebDavProbeAsync(HttpMethod method, Uri endpoint,
+            RemoteDeepDeleteOptions options, CancellationToken cancellationToken, bool depthZero = false)
+        {
+            using var request = new HttpRequestMessage(method, endpoint);
+            AddWebDavAuthorization(request, options);
+            if (depthZero) request.Headers.TryAddWithoutValidation("Depth", "0");
+            try
+            {
+                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken).ConfigureAwait(false);
+                var http = (int)response.StatusCode;
+                if (response.StatusCode == HttpStatusCode.NotFound || response.StatusCode == HttpStatusCode.Gone)
+                    return new RemoteDeepDeleteProbeResult
+                    {
+                        Success = true, Missing = true, HttpStatusCode = http,
+                        Provider = RemoteDeepDeleteProviderType.WebDav.ToString(),
+                        RemotePath = endpoint.AbsolutePath
+                    };
+                if (http >= 200 && http < 300)
+                    return new RemoteDeepDeleteProbeResult
+                    {
+                        Success = true, Exists = true, HttpStatusCode = http,
+                        Provider = RemoteDeepDeleteProviderType.WebDav.ToString(),
+                        RemotePath = endpoint.AbsolutePath
+                    };
+                return new RemoteDeepDeleteProbeResult
+                {
+                    Success = false, HttpStatusCode = http,
+                    Provider = RemoteDeepDeleteProviderType.WebDav.ToString(),
+                    RemotePath = endpoint.AbsolutePath,
+                    Error = method.Method + " verification returned HTTP " + http
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                return new RemoteDeepDeleteProbeResult
+                {
+                    Success = false, Provider = RemoteDeepDeleteProviderType.WebDav.ToString(),
+                    RemotePath = endpoint.AbsolutePath, Error = "WebDAV verification timed out or was cancelled."
+                };
+            }
+            catch (Exception ex)
+            {
+                return new RemoteDeepDeleteProbeResult
+                {
+                    Success = false, Provider = RemoteDeepDeleteProviderType.WebDav.ToString(),
+                    RemotePath = endpoint.AbsolutePath, Error = "WebDAV verification failed: " + ex.Message
+                };
+            }
+        }
+
+        private static void AddOpenListAuthorization(HttpRequestMessage request, string token)
+        {
+            if (string.IsNullOrWhiteSpace(token)) return;
+            // Keep user-supplied schemes intact. OpenList/AList deployments exist in the wild with
+            // both raw JWT Authorization values and explicit "Bearer <token>" front-end proxies.
+            request.Headers.TryAddWithoutValidation("Authorization", token.Trim());
+        }
+
+        private static void AddWebDavAuthorization(HttpRequestMessage request, RemoteDeepDeleteOptions options)
+        {
+            if (string.IsNullOrEmpty(options.Username) && string.IsNullOrEmpty(options.Password)) return;
+            var auth = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+                (options.Username ?? string.Empty) + ":" + (options.Password ?? string.Empty)));
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", auth);
         }
 
         private static string ResolveTarget(BaseItem item)
@@ -263,6 +449,12 @@ namespace StrmAssistant.Experience
                     Plugin.Instance.Logger.Debug("Remote Deep Delete target resolution failed: " + ex.Message);
             }
             return path;
+        }
+
+        private static bool IsHttpTarget(string value)
+        {
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+                   (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
         }
 
         private static string StripQueryAndFragment(string value)
@@ -318,7 +510,9 @@ namespace StrmAssistant.Experience
             if (string.IsNullOrWhiteSpace(body)) return false;
             return body.IndexOf("not found", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    body.IndexOf("object not found", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   body.IndexOf("no such file", StringComparison.OrdinalIgnoreCase) >= 0;
+                   body.IndexOf("no such file", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   body.IndexOf("file not found", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   body.IndexOf("不存在", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string BuildRemoteError(int http, int? apiCode, string body)
@@ -364,6 +558,21 @@ namespace StrmAssistant.Experience
             return new RemoteDeepDeleteExecutionResult
             {
                 Success = false,
+                DeleteAccepted = false,
+                Provider = plan?.Provider,
+                RemotePath = plan?.RemotePath,
+                Error = error
+            };
+        }
+
+        private static RemoteDeepDeleteProbeResult ProbeFail(RemoteDeepDeletePlan plan, string error,
+            int httpStatus = 0, int? apiCode = null)
+        {
+            return new RemoteDeepDeleteProbeResult
+            {
+                Success = false,
+                HttpStatusCode = httpStatus,
+                ApiCode = apiCode,
                 Provider = plan?.Provider,
                 RemotePath = plan?.RemotePath,
                 Error = error
