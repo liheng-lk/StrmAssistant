@@ -5,7 +5,6 @@ using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Events;
-using MediaBrowser.Model.Querying;
 using StrmAssistant.Compatibility;
 using StrmAssistant.Options;
 using System;
@@ -17,17 +16,231 @@ using System.Threading.Tasks;
 
 namespace StrmAssistant.MediaEnhance
 {
+    public sealed class MediaInfoIntegrityRecoveryQueueStatus
+    {
+        public bool Started { get; set; }
+        public long Queued { get; set; }
+        public long Deduplicated { get; set; }
+        public long Recovered { get; set; }
+        public long NoRecoverySource { get; set; }
+        public long FailedAttempts { get; set; }
+        public long Exhausted { get; set; }
+        public long DroppedBecauseFull { get; set; }
+        public long DrainSkippedDuringLibraryScan { get; set; }
+        public int PendingCount { get; set; }
+        public string LastItemPath { get; set; }
+        public string LastError { get; set; }
+    }
+
+    public static class MediaInfoIntegrityRecoveryQueueState
+    {
+        public static MediaInfoIntegrityRecoveryQueueStatus Status { get; } =
+            new MediaInfoIntegrityRecoveryQueueStatus();
+    }
+
+    internal sealed class MediaInfoRecoveryCandidate
+    {
+        public long ItemId { get; set; }
+        public string Source { get; set; }
+        public int Attempts { get; set; }
+        public DateTimeOffset NextAttemptUtc { get; set; }
+    }
+
+    internal static class MediaInfoIntegrityRecoveryQueue
+    {
+        private const int MaxPending = 2048;
+        private const int MaxAttempts = 3;
+        private const int TimerBatchSize = 20;
+        private static readonly ConcurrentDictionary<long, MediaInfoRecoveryCandidate> Pending =
+            new ConcurrentDictionary<long, MediaInfoRecoveryCandidate>();
+        private static readonly object TimerSync = new object();
+        private static Timer _timer;
+        private static int _draining;
+
+        public static void Start()
+        {
+            lock (TimerSync)
+            {
+                if (_timer != null) return;
+                MediaInfoIntegrityRecoveryQueueState.Status.Started = true;
+                _timer = new Timer(_ =>
+                {
+                    try { _ = DrainAsync(false, TimerBatchSize, CancellationToken.None); }
+                    catch { }
+                }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+            }
+        }
+
+        public static void Stop()
+        {
+            lock (TimerSync)
+            {
+                try { _timer?.Dispose(); } catch { }
+                _timer = null;
+                Pending.Clear();
+                MediaInfoIntegrityRecoveryQueueState.Status.Started = false;
+                MediaInfoIntegrityRecoveryQueueState.Status.PendingCount = 0;
+            }
+        }
+
+        public static void Queue(long itemId, string source)
+        {
+            if (itemId <= 0) return;
+            if (Pending.TryGetValue(itemId, out var existing))
+            {
+                existing.Source = source ?? existing.Source;
+                existing.NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(1);
+                Increment(status => status.Deduplicated++);
+                return;
+            }
+
+            if (Pending.Count >= MaxPending)
+            {
+                Increment(status => status.DroppedBecauseFull++);
+                return;
+            }
+
+            if (Pending.TryAdd(itemId, new MediaInfoRecoveryCandidate
+                {
+                    ItemId = itemId,
+                    Source = source,
+                    Attempts = 0,
+                    NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(1)
+                }))
+            {
+                Increment(status =>
+                {
+                    status.Queued++;
+                    status.PendingCount = Pending.Count;
+                });
+            }
+        }
+
+        public static async Task<int> DrainAsync(bool force, int maxItems, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Exchange(ref _draining, 1) != 0) return 0;
+            var processed = 0;
+            try
+            {
+                var manager = Plugin.Instance?.ApplicationHost?.Resolve<ILibraryManager>();
+                if (manager == null) return 0;
+                if (!force && manager.IsScanRunning)
+                {
+                    Increment(status => status.DrainSkippedDuringLibraryScan++);
+                    return 0;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var candidates = Pending.Values
+                    .Where(candidate => force || candidate.NextAttemptUtc <= now)
+                    .OrderBy(candidate => candidate.NextAttemptUtc)
+                    .Take(Math.Max(1, maxItems))
+                    .ToArray();
+
+                foreach (var candidate in candidates)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!Pending.TryGetValue(candidate.ItemId, out var current)) continue;
+                    var item = manager.GetItemById(candidate.ItemId);
+                    if (item == null || MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
+                    {
+                        Pending.TryRemove(candidate.ItemId, out _);
+                        processed++;
+                        continue;
+                    }
+
+                    if (!MediaInfoIntegrityMonitor.ShouldRecover(item))
+                    {
+                        Pending.TryRemove(candidate.ItemId, out _);
+                        Increment(status =>
+                        {
+                            status.NoRecoverySource++;
+                            status.LastItemPath = item.Path;
+                        });
+                        processed++;
+                        continue;
+                    }
+
+                    bool recovered;
+                    try
+                    {
+                        recovered = await MediaInfoIntegrityMonitor.RecoverAsync(item,
+                                (current.Source ?? "Queued IntegrityRepair") + " Background", cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        recovered = false;
+                        Increment(status =>
+                        {
+                            status.FailedAttempts++;
+                            status.LastItemPath = item.Path;
+                            status.LastError = ex.GetBaseException().Message;
+                        });
+                    }
+
+                    if (recovered)
+                    {
+                        Pending.TryRemove(candidate.ItemId, out _);
+                        Increment(status =>
+                        {
+                            status.Recovered++;
+                            status.LastItemPath = item.Path;
+                            status.LastError = null;
+                        });
+                    }
+                    else
+                    {
+                        current.Attempts++;
+                        Increment(status => status.FailedAttempts++);
+                        if (current.Attempts >= MaxAttempts)
+                        {
+                            Pending.TryRemove(candidate.ItemId, out _);
+                            Increment(status =>
+                            {
+                                status.Exhausted++;
+                                status.LastItemPath = item.Path;
+                                status.LastError = "Local MediaInfo recovery exhausted automatic retries; use the explicit STRM MediaInfo repair task if a remote rebuild is required.";
+                            });
+                        }
+                        else
+                        {
+                            current.NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(30);
+                        }
+                    }
+                    processed++;
+                }
+                return processed;
+            }
+            finally
+            {
+                Increment(status => status.PendingCount = Pending.Count);
+                Volatile.Write(ref _draining, 0);
+            }
+        }
+
+        private static void Increment(Action<MediaInfoIntegrityRecoveryQueueStatus> action)
+        {
+            if (action == null) return;
+            lock (MediaInfoIntegrityRecoveryQueueState.Status) action(MediaInfoIntegrityRecoveryQueueState.Status);
+        }
+    }
+
     /// <summary>
-    /// Repairs MediaInfo after provider refreshes that leave runtime/streams incomplete. Two local
-    /// sources are supported: the user's optional persisted MediaInfo JSON/.bak and the plugin-owned
-    /// STRM reliability shadow store. Neither recovery path invokes ffprobe or the remote media URL.
-    /// Shadow writes are queued so refresh/playback callers do not serialize files inline.
+    /// Repairs MediaInfo after provider refreshes that leave runtime/streams incomplete. Refresh events
+    /// only enqueue item ids; they never enumerate the whole library and never deserialize/write recovery
+    /// files inline. The bounded queue pauses normal draining while a library scan is active. Playback
+    /// pre-read can still recover the same item immediately from local snapshots when a user requests it.
     /// </summary>
     public sealed class MediaInfoIntegrityMonitor : IServerEntryPoint
     {
         private readonly IProviderManager _providerManager;
-        private readonly ConcurrentDictionary<long, byte> _inFlight = new ConcurrentDictionary<long, byte>();
         private bool _started;
+        private static readonly object[] RecoveryLocks = Enumerable.Range(0, 64).Select(_ => new object()).ToArray();
 
         public MediaInfoIntegrityMonitor(IProviderManager providerManager)
         {
@@ -39,6 +252,7 @@ namespace StrmAssistant.MediaEnhance
             if (_started) return;
             _started = true;
             _providerManager.RefreshCompleted += OnRefreshCompleted;
+            MediaInfoIntegrityRecoveryQueue.Start();
         }
 
         public void Dispose()
@@ -46,9 +260,10 @@ namespace StrmAssistant.MediaEnhance
             if (!_started) return;
             _started = false;
             _providerManager.RefreshCompleted -= OnRefreshCompleted;
+            MediaInfoIntegrityRecoveryQueue.Stop();
         }
 
-        private async void OnRefreshCompleted(object sender, GenericEventArgs<RefreshProgressInfo> e)
+        private void OnRefreshCompleted(object sender, GenericEventArgs<RefreshProgressInfo> e)
         {
             var item = e?.Argument?.Item;
             if (item == null) return;
@@ -60,22 +275,8 @@ namespace StrmAssistant.MediaEnhance
                 return;
             }
 
-            if (!ShouldRecover(item)) return;
-            if (!_inFlight.TryAdd(item.InternalId, 0)) return;
-
-            try
-            {
-                await RecoverAsync(item, "RefreshCompleted IntegrityRepair", CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Plugin.Instance?.Logger?.Warn("MediaInfo integrity repair after refresh failed: " + ex.Message);
-            }
-            finally
-            {
-                _inFlight.TryRemove(item.InternalId, out _);
-            }
+            if (item is Video || item is Audio)
+                MediaInfoIntegrityRecoveryQueue.Queue(item.InternalId, "RefreshCompleted IntegrityRepair");
         }
 
         internal static bool ShouldRecover(BaseItem item)
@@ -115,83 +316,42 @@ namespace StrmAssistant.MediaEnhance
             if (item == null || MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
                 return Task.FromResult(true);
 
-            var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
-            var canUsePersisted = PersistenceEnabledFor(item, options) &&
-                                  Plugin.LibraryApi?.IsLibraryInScope(item) == true &&
-                                  MediaInfoIntegrityService.SnapshotExists(item);
-            if (canUsePersisted && MediaInfoIntegrityService.HydrateCore(item, source + " Persisted"))
+            var lockIndex = (int)(Math.Abs(item.InternalId) % RecoveryLocks.Length);
+            lock (RecoveryLocks[lockIndex])
             {
-                var fresh = Plugin.Instance.ApplicationHost.Resolve<ILibraryManager>()?.GetItemById(item.InternalId) ?? item;
-                if (MediaInfoReliabilityShadowStore.AppliesTo(fresh))
-                    MediaInfoReliabilityShadowPatches.QueueCapture(fresh.InternalId);
-                return Task.FromResult(true);
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                var fresh = Plugin.Instance?.ApplicationHost?.Resolve<ILibraryManager>()?.GetItemById(item.InternalId) ?? item;
+                if (MediaInfoIntegrityService.IsCoreMediaInfoComplete(fresh)) return Task.FromResult(true);
 
-            return Task.FromResult(MediaInfoReliabilityShadowStore.Restore(item, source + " Shadow"));
+                var options = Plugin.Instance?.GetPluginOptions()?.MediaInfoExtractOptions;
+                var canUsePersisted = PersistenceEnabledFor(fresh, options) &&
+                                      Plugin.LibraryApi?.IsLibraryInScope(fresh) == true &&
+                                      MediaInfoIntegrityService.SnapshotExists(fresh);
+                if (canUsePersisted && MediaInfoIntegrityService.HydrateCore(fresh, source + " Persisted"))
+                {
+                    var restored = Plugin.Instance.ApplicationHost.Resolve<ILibraryManager>()?.GetItemById(fresh.InternalId) ?? fresh;
+                    if (MediaInfoReliabilityShadowStore.AppliesTo(restored))
+                        MediaInfoReliabilityShadowPatches.QueueCapture(restored.InternalId);
+                    return Task.FromResult(true);
+                }
+
+                return Task.FromResult(MediaInfoReliabilityShadowStore.Restore(fresh, source + " Shadow"));
+            }
         }
     }
 
     public sealed class MediaInfoIntegrityPostScanTask : ILibraryPostScanTask
     {
-        private readonly ILibraryManager _libraryManager;
-
-        public MediaInfoIntegrityPostScanTask(ILibraryManager libraryManager)
-        {
-            _libraryManager = libraryManager;
-        }
-
         public async Task Run(IProgress<double> progress, CancellationToken cancellationToken)
         {
             if (Plugin.Instance == null || Plugin.LibraryApi == null || Plugin.MediaInfoApi == null)
                 return;
 
-            var options = Plugin.Instance.GetPluginOptions()?.MediaInfoExtractOptions;
-            var items = _libraryManager.GetItemList(new InternalItemsQuery
-            {
-                HasPath = true,
-                MediaTypes = options?.PersistMusicMediaInfo == true
-                    ? new[] { MediaType.Video, MediaType.Audio }
-                    : new[] { MediaType.Video }
-            }) ?? Array.Empty<BaseItem>();
-
-            var candidates = items
-                .Where(MediaInfoIntegrityMonitor.ShouldRecover)
-                .GroupBy(item => item.InternalId)
-                .Select(group => group.First())
-                .ToList();
-
-            if (candidates.Count == 0)
-            {
-                progress?.Report(100);
-                return;
-            }
-
-            var repaired = 0;
-            for (var index = 0; index < candidates.Count; index++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var item = candidates[index];
-                try
-                {
-                    if (await MediaInfoIntegrityMonitor
-                            .RecoverAsync(item, "PostScan IntegrityRepair", cancellationToken)
-                            .ConfigureAwait(false))
-                        repaired++;
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Instance.Logger.Warn("MediaInfo post-scan repair failed for {0}: {1}", item.Path, ex.Message);
-                }
-
-                progress?.Report((index + 1) * 100d / candidates.Count);
-            }
-
-            Plugin.Instance.Logger.Info("MediaInfo post-scan integrity repair: {0}/{1} snapshots restored.",
-                repaired, candidates.Count);
+            progress?.Report(0);
+            // No GetItemList/full-library sweep here. RefreshCompleted has already queued only item ids
+            // that actually changed; force one bounded pass now that Emby's scan reached post-scan.
+            await MediaInfoIntegrityRecoveryQueue.DrainAsync(true, 200, cancellationToken).ConfigureAwait(false);
+            progress?.Report(100);
         }
     }
 }
