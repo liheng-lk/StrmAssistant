@@ -6,6 +6,7 @@ using MediaBrowser.Model.Services;
 using StrmAssistant.Compatibility;
 using StrmAssistant.Experience;
 using StrmAssistant.MediaEnhance;
+using StrmAssistant.Notification;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -44,6 +45,9 @@ namespace StrmAssistant.Api
         public bool RemoteVerifiedDeleted { get; set; }
         public int RemoteDeleteStatusCode { get; set; }
         public int RemoteVerificationStatusCode { get; set; }
+        public string NotificationEventId { get; set; } = StrmAssistantNotificationTypes.DeepDelete;
+        public bool NotificationAccepted { get; set; }
+        public List<string> NotificationTargets { get; set; } = new List<string>();
         public List<DeepDeleteResponseEntry> Entries { get; set; } = new List<DeepDeleteResponseEntry>();
         public List<string> Warnings { get; set; } = new List<string>();
         public List<string> DeletedPaths { get; set; } = new List<string>();
@@ -82,11 +86,27 @@ namespace StrmAssistant.Api
             if (options == null) return ErrorResponse(request.Id, "Plugin options are unavailable.");
 
             var remotePlan = _remoteDeepDeleteService.BuildPlan(item);
-            if (remotePlan.Applicable)
-                return ToRemoteResponse(item, remotePlan, options.DeepDeleteDryRun);
+            var notificationTargets = CaptureNotificationTargets(item, remotePlan);
 
-            var plan = _deepDeleteService.BuildPlan(item.Path, options);
-            return ToResponse(item, plan, options.DeepDeleteDryRun);
+            DeepDeleteResponse response;
+            if (remotePlan.Applicable)
+            {
+                response = ToRemoteResponse(item, remotePlan, options.DeepDeleteDryRun);
+            }
+            else
+            {
+                var plan = _deepDeleteService.BuildPlan(item.Path, options);
+                response = ToResponse(item, plan, options.DeepDeleteDryRun);
+                if (DeepDeleteNotificationTargets.ContainsHttpTarget(notificationTargets))
+                {
+                    response.Warnings.RemoveAll(value =>
+                        value?.IndexOf("Remote STRM target is not deletable", StringComparison.OrdinalIgnoreCase) >= 0);
+                    response.Warnings.Add("Remote STRM target will be delegated through the provider-agnostic deep.delete notification; the plugin will not delete that remote URL directly.");
+                }
+            }
+
+            AttachNotificationPreview(response, notificationTargets);
+            return response;
         }
 
         public async Task<object> Delete(ExecuteDeepDelete request)
@@ -98,18 +118,24 @@ namespace StrmAssistant.Api
             if (options == null || !options.EnableDeepDelete)
                 return ErrorResponse(request.Id, "Deep delete is disabled in plugin options.");
 
+            // Capture before any provider/local/Emby delete. Once Emby removes the .strm file the
+            // external webhook consumer would otherwise lose the original direct-link target.
             var remotePlan = _remoteDeepDeleteService.BuildPlan(item);
+            var notificationTargets = CaptureNotificationTargets(item, remotePlan);
+
             if (remotePlan.Applicable)
-                return await ExecuteRemoteAsync(item, request, options.DeepDeleteDryRun, remotePlan)
+                return await ExecuteRemoteAsync(item, request, options.DeepDeleteDryRun, remotePlan, notificationTargets)
                     .ConfigureAwait(false);
 
-            return ExecuteLocal(item, request, options);
+            return ExecuteLocal(item, request, options, notificationTargets);
         }
 
         private async Task<DeepDeleteResponse> ExecuteRemoteAsync(BaseItem item, ExecuteDeepDelete request,
-            bool dryRun, RemoteDeepDeletePlan remotePlan)
+            bool dryRun, RemoteDeepDeletePlan remotePlan, HashSet<string> notificationTargets)
         {
             var response = ToRemoteResponse(item, remotePlan, dryRun);
+            AttachNotificationPreview(response, notificationTargets);
+
             if (request?.Confirm != true)
             {
                 response.Warnings.Add("Execution was not confirmed. Set Confirm=true after reviewing the remote plan.");
@@ -117,7 +143,7 @@ namespace StrmAssistant.Api
             }
             if (dryRun)
             {
-                response.Warnings.Add("Dry Run is enabled. No remote object, STRM file, or Emby item was deleted.");
+                response.Warnings.Add("Dry Run is enabled. No remote object, STRM file, Emby item, or deep.delete notification was executed.");
                 return response;
             }
             if (!remotePlan.Allowed)
@@ -144,20 +170,39 @@ namespace StrmAssistant.Api
             }
 
             response.DeletedPaths.Add(remotePlan.RemotePath);
-            CleanupPersistenceSnapshot(item, response);
+
+            // deep.delete is also emitted for direct providers so existing Emby webhook automation
+            // keeps observing the same operation. It contains both the raw STRM target and any
+            // provider-specific mapped path captured above.
+            if (!Notify(item, notificationTargets, response))
+            {
+                response.Errors.Add("Remote target was deleted, but deep.delete could not be accepted by the Emby notification system. The local STRM/Emby item was preserved for recovery/retry.");
+                return response;
+            }
+
             if (!DeleteEmbyItem(item, response)) return response;
+            CleanupPersistenceSnapshot(item, response);
 
             response.Executed = true;
             response.Success = true;
-            Notify(item, new[] { remotePlan.RemotePath });
             return response;
         }
 
         private DeepDeleteResponse ExecuteLocal(BaseItem item, ExecuteDeepDelete request,
-            StrmAssistant.Options.ExperienceEnhanceOptions options)
+            StrmAssistant.Options.ExperienceEnhanceOptions options, HashSet<string> notificationTargets)
         {
             var plan = _deepDeleteService.BuildPlan(item.Path, options);
             var response = ToResponse(item, plan, options.DeepDeleteDryRun);
+            AttachNotificationPreview(response, notificationTargets);
+
+            var delegatedExternalTarget = DeepDeleteNotificationTargets.ContainsHttpTarget(notificationTargets);
+            if (delegatedExternalTarget)
+            {
+                response.Warnings.RemoveAll(value =>
+                    value?.IndexOf("Remote STRM target is not deletable", StringComparison.OrdinalIgnoreCase) >= 0);
+                response.Warnings.Add("The HTTP/HTTPS STRM target is not deleted by the local executor. It is sent unchanged in deep.delete -> Mount Paths for external webhook automation.");
+            }
+
             if (request == null || !request.Confirm)
             {
                 response.Warnings.Add("Execution was not confirmed. Set Confirm=true after reviewing the plan.");
@@ -165,7 +210,7 @@ namespace StrmAssistant.Api
             }
             if (options.DeepDeleteDryRun)
             {
-                response.Warnings.Add("Dry Run is enabled. No files or Emby items were deleted.");
+                response.Warnings.Add("Dry Run is enabled. No files, Emby items, or deep.delete notification were executed.");
                 return response;
             }
             if (plan.HasBlockedEntries)
@@ -173,7 +218,7 @@ namespace StrmAssistant.Api
                 response.Errors.Add("The plan contains paths outside the configured allowed roots. Execution was aborted.");
                 return response;
             }
-            if (options.DeepDeleteTargetFile && !plan.HasResolvedMediaTarget)
+            if (options.DeepDeleteTargetFile && !plan.HasResolvedMediaTarget && !delegatedExternalTarget)
             {
                 response.Errors.Add("A local STRM or symbolic-link media target could not be resolved. Execution was aborted.");
                 return response;
@@ -190,16 +235,17 @@ namespace StrmAssistant.Api
                 return response;
             }
 
-            CleanupPersistenceSnapshot(item, response);
+            if (!Notify(item, notificationTargets, response))
+            {
+                response.Errors.Add("deep.delete could not be accepted by the Emby notification system. The local STRM/Emby item was preserved so the operation can be retried.");
+                return response;
+            }
+
             if (!DeleteEmbyItem(item, response)) return response;
+            CleanupPersistenceSnapshot(item, response);
 
             response.Executed = true;
             response.Success = true;
-            var targetPaths = plan.Entries
-                .Where(entry => DeepDeletePlan.IsMediaTarget(entry.Kind) &&
-                                response.DeletedPaths.Contains(entry.Path, StringComparer.OrdinalIgnoreCase))
-                .Select(entry => entry.Path);
-            Notify(item, targetPaths);
             return response;
         }
 
@@ -216,7 +262,7 @@ namespace StrmAssistant.Api
             }
             catch (Exception ex)
             {
-                response.Errors.Add("Media target was deleted, but Emby item deletion failed: " + ex.Message);
+                response.Errors.Add("The external operation was accepted, but Emby item deletion failed: " + ex.Message);
                 return false;
             }
         }
@@ -246,20 +292,76 @@ namespace StrmAssistant.Api
             }
         }
 
-        private void Notify(BaseItem item, IEnumerable<string> targetPaths)
+        private bool Notify(BaseItem item, HashSet<string> targetPaths, DeepDeleteResponse response)
         {
             try
             {
                 var actingUser = _authorizationContext.GetAuthorizationInfo(Request)?.User;
-                if (actingUser == null || Plugin.NotificationApi == null) return;
+                if (actingUser == null)
+                {
+                    actingUser = Common.LibraryApi.AllUsers
+                        .Where(kvp => kvp.Value)
+                        .Select(kvp => kvp.Key)
+                        .FirstOrDefault();
+                }
+
+                if (actingUser == null)
+                {
+                    response.Warnings.Add("deep.delete notification was not sent because no acting/admin user could be resolved.");
+                    return false;
+                }
+                if (Plugin.NotificationApi == null)
+                {
+                    response.Warnings.Add("deep.delete notification was not sent because NotificationApi is unavailable.");
+                    return false;
+                }
+
                 Plugin.NotificationApi.DeepDeleteSendNotification(item, actingUser,
-                    new HashSet<string>(targetPaths?.Where(v => !string.IsNullOrWhiteSpace(v)) ?? Enumerable.Empty<string>(),
-                        StringComparer.OrdinalIgnoreCase));
+                    new HashSet<string>(targetPaths ?? new HashSet<string>(), StringComparer.OrdinalIgnoreCase));
+                response.NotificationAccepted = true;
+                return true;
             }
             catch (Exception ex)
             {
+                response.Warnings.Add("deep.delete notification dispatch failed: " + ex.Message);
                 if (Plugin.Instance?.DebugMode == true)
                     Plugin.Instance.Logger.Debug("Deep Delete notification failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static HashSet<string> CaptureNotificationTargets(BaseItem item, RemoteDeepDeletePlan remotePlan)
+        {
+            var extras = new[]
+            {
+                remotePlan?.SourceTarget,
+                remotePlan?.RemotePath
+            };
+            return DeepDeleteNotificationTargets.Capture(item?.Path, extras);
+        }
+
+        private static void AttachNotificationPreview(DeepDeleteResponse response, HashSet<string> notificationTargets)
+        {
+            if (response == null) return;
+
+            response.NotificationEventId = StrmAssistantNotificationTypes.DeepDelete;
+            response.NotificationTargets = (notificationTargets ?? new HashSet<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var target in response.NotificationTargets)
+            {
+                if (response.Entries.Any(entry => string.Equals(entry.Path, target, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                response.Entries.Add(new DeepDeleteResponseEntry
+                {
+                    Path = target,
+                    Kind = "WebhookTarget",
+                    Allowed = true,
+                    Reason = "Captured before STRM deletion and emitted unchanged in deep.delete -> Mount Paths. The external webhook consumer decides how/if to delete it."
+                });
             }
         }
 
@@ -301,7 +403,7 @@ namespace StrmAssistant.Api
                         Path = item.Path,
                         Kind = item.IsShortcut ? "StrmFile" : "EmbySource",
                         Allowed = true,
-                        Reason = "Removed only after the remote provider deletion has been verified."
+                        Reason = "Removed only after the remote provider deletion and deep.delete dispatch have completed."
                     });
                 }
                 if (!plan.Allowed && !string.IsNullOrWhiteSpace(plan.Error)) response.Errors.Add(plan.Error);
