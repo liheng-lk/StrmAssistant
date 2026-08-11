@@ -156,7 +156,7 @@ internal static class LocalMetadataContractTests
         public int Value;
     }
 
-    private sealed class JsonSerializerProxy : DispatchProxy
+    private class JsonSerializerProxy : DispatchProxy
     {
         public Counter Counter { get; } = new Counter();
 
