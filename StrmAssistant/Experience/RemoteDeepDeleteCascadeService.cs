@@ -3,7 +3,6 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Entities;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 
 namespace StrmAssistant.Experience
@@ -26,6 +25,7 @@ namespace StrmAssistant.Experience
     {
         public bool Applicable { get; set; }
         public bool Allowed { get; set; }
+        public bool EnumerationFailed { get; set; }
         public int RootItemCount { get; set; }
         public int EnumeratedItemCount { get; set; }
         public int RemoteCandidateCount { get; set; }
@@ -35,15 +35,15 @@ namespace StrmAssistant.Experience
         public int MaxRemoteCandidates { get; set; }
         public bool CandidateLimitExceeded { get; set; }
         public List<RemoteDeepDeleteCascadeEntry> Entries { get; set; } = new List<RemoteDeepDeleteCascadeEntry>();
+        public List<string> EnumerationErrors { get; set; } = new List<string>();
         public List<string> Warnings { get; set; } = new List<string>();
         public string Error { get; set; }
     }
 
     /// <summary>
     /// Expands one or more Emby delete roots into media leaves before a destructive native delete is
-    /// allowed to continue. This closes the folder/Series/Season and DELETE /Items?Ids=... gaps where
-    /// Emby can remove a local STRM tree while a direct-item-only remote bridge never sees the cloud
-    /// targets below it.
+    /// allowed to continue. Container descendant enumeration is fail-closed: an error can never be
+    /// interpreted as an empty folder during a destructive operation.
     /// </summary>
     public sealed class RemoteDeepDeleteCascadeService
     {
@@ -63,6 +63,12 @@ namespace StrmAssistant.Experience
             {
                 MaxRemoteCandidates = Math.Max(1, maxRemoteCandidates)
             };
+            var runtime = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
+            if (!runtime.Enabled || runtime.Provider == RemoteDeepDeleteProviderType.None)
+            {
+                result.Error = "Remote Deep Delete is disabled or no remote provider is selected.";
+                return result;
+            }
 
             var roots = (rootItems ?? Enumerable.Empty<BaseItem>())
                 .Where(item => item != null && item.InternalId > 0)
@@ -80,7 +86,17 @@ namespace StrmAssistant.Experience
             foreach (var root in roots)
             {
                 expanded[root.InternalId] = Tuple.Create(root, true, false);
-                foreach (var descendant in FetchMediaDescendants(root))
+                if (!(root is Folder)) continue;
+
+                if (!TryFetchMediaDescendants(root, out var descendants, out var enumerationError))
+                {
+                    result.EnumerationFailed = true;
+                    result.EnumerationErrors.Add(enumerationError ??
+                        "Unknown descendant enumeration failure for root " + root.InternalId + ".");
+                    continue;
+                }
+
+                foreach (var descendant in descendants)
                 {
                     if (descendant == null || descendant.InternalId <= 0) continue;
                     if (!expanded.ContainsKey(descendant.InternalId))
@@ -133,10 +149,14 @@ namespace StrmAssistant.Experience
                 .Select(entry => entry.RemotePlan.RemotePath)
                 .Distinct(StringComparer.Ordinal)
                 .Count();
-            result.Applicable = result.RemoteCandidateCount > 0 || result.BlockedRemoteCount > 0;
+            result.Applicable = result.EnumerationFailed || result.RemoteCandidateCount > 0 || result.BlockedRemoteCount > 0;
             result.CandidateLimitExceeded = result.RemoteCandidateCount > result.MaxRemoteCandidates;
 
-            if (result.CandidateLimitExceeded)
+            if (result.EnumerationFailed)
+            {
+                result.Error = "One or more container descendant queries failed. Destructive cascade execution is blocked because an enumeration failure cannot be treated as an empty folder.";
+            }
+            else if (result.CandidateLimitExceeded)
             {
                 result.Error = "Cascade contains " + result.RemoteCandidateCount +
                                " remote media items, exceeding the safety limit of " +
@@ -148,7 +168,7 @@ namespace StrmAssistant.Experience
                                " remote-looking media items failed mapping/allow-list preflight. No native local deletion should continue.";
             }
 
-            result.Allowed = result.Applicable && !result.CandidateLimitExceeded &&
+            result.Allowed = result.Applicable && !result.EnumerationFailed && !result.CandidateLimitExceeded &&
                              result.BlockedRemoteCount == 0 &&
                              result.Entries.Where(entry => entry.RequiresRemoteDelete).All(entry => entry.Allowed);
 
@@ -159,32 +179,38 @@ namespace StrmAssistant.Experience
                 .ToList();
             if (duplicateRemotePaths.Count > 0)
                 result.Warnings.Add(duplicateRemotePaths.Count +
-                                    " remote paths are referenced by multiple Emby items; each unique cloud path must be deleted only once, while every matching local item still waits for Emby's ItemRemoved confirmation.");
+                                    " remote paths are referenced by multiple Emby items; each unique cloud path is deleted only once, while every matching local item still waits for Emby's ItemRemoved confirmation.");
 
-            if (result.RemoteCandidateCount == 0 && result.BlockedRemoteCount == 0)
+            if (!result.EnumerationFailed && result.RemoteCandidateCount == 0 && result.BlockedRemoteCount == 0)
                 result.Warnings.Add("No remote STRM targets were found under the requested delete roots.");
             return result;
         }
 
-        private IEnumerable<BaseItem> FetchMediaDescendants(BaseItem root)
+        private bool TryFetchMediaDescendants(BaseItem root, out BaseItem[] descendants, out string error)
         {
+            descendants = Array.Empty<BaseItem>();
+            error = null;
             if (root == null || _libraryManager == null || root.InternalId <= 0)
-                return Array.Empty<BaseItem>();
+            {
+                error = "Invalid root or library manager while enumerating remote-delete descendants.";
+                return false;
+            }
             try
             {
-                return _libraryManager.GetItemList(new InternalItemsQuery
+                descendants = _libraryManager.GetItemList(new InternalItemsQuery
                 {
                     AncestorIds = new[] { root.InternalId },
                     HasPath = true,
                     MediaTypes = new[] { MediaType.Video, MediaType.Audio },
                     Recursive = true
                 }) ?? Array.Empty<BaseItem>();
+                return true;
             }
             catch (Exception ex)
             {
-                Plugin.Instance?.Logger?.Warn("Remote Deep Delete cascade descendant enumeration failed for {0}: {1}",
-                    root.Path, ex.Message);
-                return Array.Empty<BaseItem>();
+                error = "Root " + root.InternalId + " (" + root.Path + "): " + ex.GetBaseException().Message;
+                Plugin.Instance?.Logger?.Warn("Remote Deep Delete cascade descendant enumeration failed: " + error);
+                return false;
             }
         }
 
