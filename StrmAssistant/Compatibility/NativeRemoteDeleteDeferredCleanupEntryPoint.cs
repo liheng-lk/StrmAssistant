@@ -4,6 +4,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using StrmAssistant.Api;
 using StrmAssistant.Common;
+using StrmAssistant.Experience;
 using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
@@ -20,9 +21,11 @@ namespace StrmAssistant.Compatibility
         public long ItemRemovedMatched { get; set; }
         public long DeferredCleanupsSucceeded { get; set; }
         public long DeferredCleanupsFailed { get; set; }
+        public long JournalEntriesCleared { get; set; }
         public long PendingExpired { get; set; }
         public int PendingCount { get; set; }
         public string LastItemPath { get; set; }
+        public string LastRemotePath { get; set; }
         public string LastError { get; set; }
         public string Error { get; set; }
     }
@@ -38,7 +41,8 @@ namespace StrmAssistant.Compatibility
     /// persistence must not be deleted before that final local/library step because it can still fail.
     /// This entry point suppresses immediate cleanup in both the native remote bridge and the explicit
     /// DeepDelete API, records the exact item, and clears persistence/shadow only after ItemRemoved
-    /// confirms that Emby actually removed that item.
+    /// confirms that Emby actually removed that item. A verified-delete retry journal entry is also
+    /// cleared only at that point, so a remote-success/local-failure remains safely retryable.
     /// </summary>
     public sealed class NativeRemoteDeleteDeferredCleanupEntryPoint : IServerEntryPoint
     {
@@ -119,19 +123,31 @@ namespace StrmAssistant.Compatibility
                 {
                     status.ItemRemovedMatched++;
                     status.LastItemPath = pending.ItemPath;
+                    status.LastRemotePath = pending.RemotePath;
                 });
-                if (CleanupPersistenceSnapshot(e.Item))
-                {
-                    Increment(status =>
-                    {
-                        status.DeferredCleanupsSucceeded++;
-                        status.LastError = null;
-                    });
-                }
-                else
+
+                if (!CleanupPersistenceSnapshot(e.Item))
                 {
                     Increment(status => status.DeferredCleanupsFailed++);
+                    return;
                 }
+
+                if (!string.IsNullOrWhiteSpace(pending.RemotePath))
+                {
+                    RemoteDeepDeleteTransactionJournalStore.Remove(new RemoteDeepDeletePlan
+                    {
+                        Provider = pending.RemoteProvider,
+                        RemotePath = pending.RemotePath,
+                        SourceTarget = pending.SourceTarget
+                    });
+                    Increment(status => status.JournalEntriesCleared++);
+                }
+
+                Increment(status =>
+                {
+                    status.DeferredCleanupsSucceeded++;
+                    status.LastError = null;
+                });
             }
             catch (Exception ex)
             {
@@ -207,7 +223,9 @@ namespace StrmAssistant.Compatibility
     {
         public long ItemId { get; set; }
         public string ItemPath { get; set; }
+        public string RemoteProvider { get; set; }
         public string RemotePath { get; set; }
+        public string SourceTarget { get; set; }
         public DateTimeOffset QueuedUtc { get; set; }
     }
 
@@ -223,6 +241,18 @@ namespace StrmAssistant.Compatibility
         public static void MarkPending(BaseItem item, string remotePath)
         {
             if (item == null || item.InternalId <= 0) return;
+
+            RemoteDeepDeletePlan plan = null;
+            try
+            {
+                plan = new RemoteDeepDeleteService().BuildPlan(item);
+            }
+            catch (Exception ex)
+            {
+                if (Plugin.Instance?.DebugMode == true)
+                    Plugin.Instance.Logger.Debug("Deferred cleanup could not reconstruct remote plan: " + ex.Message);
+            }
+
             lock (SyncRoot)
             {
                 PruneExpiredUnsafe();
@@ -230,7 +260,9 @@ namespace StrmAssistant.Compatibility
                 {
                     ItemId = item.InternalId,
                     ItemPath = item.Path,
-                    RemotePath = remotePath,
+                    RemoteProvider = plan?.Provider,
+                    RemotePath = !string.IsNullOrWhiteSpace(remotePath) ? remotePath : plan?.RemotePath,
+                    SourceTarget = plan?.SourceTarget,
                     QueuedUtc = DateTimeOffset.UtcNow
                 };
                 var status = NativeRemoteDeleteDeferredCleanupState.Status;
@@ -239,6 +271,7 @@ namespace StrmAssistant.Compatibility
                     status.PendingQueued++;
                     status.PendingCount = Pending.Count;
                     status.LastItemPath = item.Path;
+                    status.LastRemotePath = Pending[item.InternalId].RemotePath;
                 }
             }
         }
