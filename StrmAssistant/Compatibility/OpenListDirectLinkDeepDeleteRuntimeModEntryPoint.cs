@@ -26,12 +26,6 @@ namespace StrmAssistant.Compatibility
             new OpenListDirectLinkDeepDeleteStatus();
     }
 
-    /// <summary>
-    /// OpenList-generated STRM links normally expose the mounted path through /d/&lt;path&gt;.
-    /// Manual mappings remain authoritative. This fallback only activates when BuildPlan failed
-    /// specifically because no manual mapping matched, the direct-link authority equals the configured
-    /// OpenList BaseUrl authority, and the decoded path remains inside AllowedRemoteRoots.
-    /// </summary>
     public sealed class OpenListDirectLinkDeepDeleteRuntimeModEntryPoint : IServerEntryPoint
     {
         private const string HarmonyId = "liheng-lk.strmassistantcustom.openlist-directlink-delete";
@@ -86,8 +80,6 @@ namespace StrmAssistant.Compatibility
             var options = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
             if (!options.Enabled || options.Provider != RemoteDeepDeleteProviderType.OpenList) return;
             if (string.IsNullOrWhiteSpace(plan.SourceTarget)) return;
-
-            // A valid manual mapping always wins. Only recover the explicit "no mapping" failure.
             if (string.IsNullOrWhiteSpace(plan.Error) ||
                 plan.Error.IndexOf("did not match any configured remote path mapping", StringComparison.OrdinalIgnoreCase) < 0)
                 return;
@@ -177,7 +169,7 @@ namespace StrmAssistant.Compatibility
                 {
                     OpenListDirectLinkDeepDeleteState.Status.RejectedAuthorityMismatch++;
                 }
-                error = "STRM /d/ target authority does not match configured OpenList BaseUrl; use an explicit mapping for aliases/reverse proxies.";
+                error = "STRM /d/ target origin does not match configured OpenList BaseUrl; use an explicit mapping for aliases/reverse proxies.";
                 return false;
             }
 
@@ -209,6 +201,7 @@ namespace StrmAssistant.Compatibility
 
         private static bool SameAuthority(Uri left, Uri right)
         {
+            if (!string.Equals(left.Scheme, right.Scheme, StringComparison.OrdinalIgnoreCase)) return false;
             if (!string.Equals(left.Host, right.Host, StringComparison.OrdinalIgnoreCase)) return false;
             return EffectivePort(left) == EffectivePort(right);
         }
