@@ -91,8 +91,23 @@ namespace StrmAssistant.Experience
                 if (!TryFetchMediaDescendants(root, out var descendants, out var enumerationError))
                 {
                     result.EnumerationFailed = true;
-                    result.EnumerationErrors.Add(enumerationError ??
-                        "Unknown descendant enumeration failure for root " + root.InternalId + ".");
+                    var error = enumerationError ??
+                                "Unknown descendant enumeration failure for root " + root.InternalId + ".";
+                    result.EnumerationErrors.Add(error);
+                    // Synthetic unknown-descendant entry makes every native guard fail closed even when
+                    // no real leaf could be enumerated. It is never executable as a remote delete plan.
+                    result.Entries.Add(new RemoteDeepDeleteCascadeEntry
+                    {
+                        ItemId = "enumeration:" + root.InternalId,
+                        ItemName = root.Name,
+                        ItemPath = root.Path,
+                        IsRootItem = false,
+                        IsDescendant = true,
+                        LooksRemote = true,
+                        RequiresRemoteDelete = false,
+                        Allowed = false,
+                        Error = error
+                    });
                     continue;
                 }
 
