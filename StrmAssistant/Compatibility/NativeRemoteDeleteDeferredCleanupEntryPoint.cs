@@ -2,10 +2,12 @@ using HarmonyLib;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
+using StrmAssistant.Api;
 using StrmAssistant.Common;
 using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 namespace StrmAssistant.Compatibility
@@ -13,6 +15,7 @@ namespace StrmAssistant.Compatibility
     public sealed class NativeRemoteDeleteDeferredCleanupStatus
     {
         public bool ImmediateCleanupSuppressed { get; set; }
+        public int CleanupTargetsPatched { get; set; }
         public long PendingQueued { get; set; }
         public long ItemRemovedMatched { get; set; }
         public long DeferredCleanupsSucceeded { get; set; }
@@ -31,10 +34,10 @@ namespace StrmAssistant.Compatibility
     }
 
     /// <summary>
-    /// The native remote-delete bridge necessarily removes the cloud object before Emby performs its
-    /// local/library deletion. MediaInfo persistence must not be deleted in that prefix because the
-    /// subsequent Emby deletion can still fail. This entry point suppresses the old immediate cleanup,
-    /// records the exact item, and clears persistence/shadow only after ILibraryManager.ItemRemoved
+    /// Remote/local target deletion necessarily happens before Emby removes its library item. MediaInfo
+    /// persistence must not be deleted before that final local/library step because it can still fail.
+    /// This entry point suppresses immediate cleanup in both the native remote bridge and the explicit
+    /// DeepDelete API, records the exact item, and clears persistence/shadow only after ItemRemoved
     /// confirms that Emby actually removed that item.
     /// </summary>
     public sealed class NativeRemoteDeleteDeferredCleanupEntryPoint : IServerEntryPoint
@@ -55,20 +58,46 @@ namespace StrmAssistant.Compatibility
             NativeRemoteDeleteDeferredCleanupState.Status = status;
             try
             {
-                var cleanup = typeof(NativeItemDeleteRemoteBridgePatches).GetMethod(
-                    "CleanupPersistenceSnapshot", BindingFlags.Static | BindingFlags.NonPublic);
-                if (cleanup == null)
+                var cleanups = new[]
+                    {
+                        typeof(NativeItemDeleteRemoteBridgePatches).GetMethod(
+                            "CleanupPersistenceSnapshot", BindingFlags.Static | BindingFlags.NonPublic),
+                        typeof(DeepDeleteApiService).GetMethod(
+                            "CleanupPersistenceSnapshot", BindingFlags.Static | BindingFlags.NonPublic)
+                    }
+                    .Where(method => method != null)
+                    .Distinct()
+                    .ToArray();
+                if (cleanups.Length == 0)
                 {
-                    status.Error = "NativeItemDeleteRemoteBridgePatches.CleanupPersistenceSnapshot was not found.";
+                    status.Error = "No pre-ItemRemoved MediaInfo cleanup target was found.";
                     return;
                 }
 
                 _harmony = new Harmony(HarmonyId);
-                _harmony.Patch(cleanup, prefix: new HarmonyMethod(
+                var prefix = new HarmonyMethod(
                     typeof(NativeRemoteDeleteDeferredCleanupPatches).GetMethod(
                         nameof(NativeRemoteDeleteDeferredCleanupPatches.SuppressImmediateCleanup),
-                        BindingFlags.Public | BindingFlags.Static)));
-                status.ImmediateCleanupSuppressed = true;
+                        BindingFlags.Public | BindingFlags.Static));
+                foreach (var cleanup in cleanups)
+                {
+                    try
+                    {
+                        _harmony.Patch(cleanup, prefix: prefix);
+                        status.CleanupTargetsPatched++;
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Instance?.Logger?.Warn("Deferred MediaInfo cleanup could not patch {0}: {1}",
+                            cleanup, ex.Message);
+                    }
+                }
+                status.ImmediateCleanupSuppressed = status.CleanupTargetsPatched > 0;
+                if (!status.ImmediateCleanupSuppressed)
+                {
+                    status.Error = "All deferred cleanup Harmony patches failed.";
+                    return;
+                }
 
                 _libraryManager.ItemRemoved += OnItemRemoved;
                 _pruneTimer = new System.Threading.Timer(_ => NativeRemoteDeleteDeferredCleanupQueue.PruneExpired(),
@@ -126,7 +155,7 @@ namespace StrmAssistant.Compatibility
                     var directoryService = Plugin.MediaInfoApi.GetMediaInfoRefreshOptions().DirectoryService;
                     var primary = MediaInfoApi.GetMediaInfoJsonPath(item);
                     Plugin.MediaInfoApi.DeleteMediaInfoJson(item, directoryService,
-                        "Confirmed Native Remote Deep Delete ItemRemoved");
+                        "Confirmed Deep Delete ItemRemoved");
                     var backup = MediaInfoPersistenceReliabilityPatches.BackupPath(primary);
                     if (!string.IsNullOrWhiteSpace(backup) && System.IO.File.Exists(backup))
                         System.IO.File.Delete(backup);
