@@ -1,10 +1,11 @@
-using MediaBrowser.Model.Serialization;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -57,12 +58,6 @@ namespace StrmAssistant.Experience
         public string Error { get; set; }
     }
 
-    /// <summary>
-    /// OpenList-only conservative sidecar cleanup. Candidates must come from the real remote directory
-    /// listing, share the exact main-file stem (or a language/role suffix separated by '.'/'-'), and use
-    /// a non-video allowlisted metadata/subtitle/image extension. Generic poster.jpg and other video
-    /// versions are intentionally never inferred/deleted.
-    /// </summary>
     public sealed class OpenListRemoteSidecarService
     {
         private const int ListPageSize = 1000;
@@ -73,6 +68,9 @@ namespace StrmAssistant.Experience
             ".nfo", ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx",
             ".jpg", ".jpeg", ".png", ".webp", ".json", ".xml"
         };
+
+        internal static Func<HttpRequestMessage, HttpCompletionOption, CancellationToken,
+            Task<HttpResponseMessage>> SendAsyncOverride { get; set; }
 
         public async Task<OpenListRemoteSidecarPlan> PlanAsync(RemoteDeepDeletePlan mainPlan,
             CancellationToken cancellationToken)
@@ -190,7 +188,7 @@ namespace StrmAssistant.Experience
             timeout.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
             try
             {
-                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseContentRead, timeout.Token)
+                using var response = await SendAsync(request, HttpCompletionOption.ResponseContentRead, timeout.Token)
                     .ConfigureAwait(false);
                 var responseText = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 result.Executed = true;
@@ -251,7 +249,7 @@ namespace StrmAssistant.Experience
             timeout.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
             try
             {
-                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseContentRead, timeout.Token)
+                using var response = await SendAsync(request, HttpCompletionOption.ResponseContentRead, timeout.Token)
                     .ConfigureAwait(false);
                 var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300)
@@ -287,12 +285,23 @@ namespace StrmAssistant.Experience
             }
         }
 
+        private static Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            HttpCompletionOption completionOption, CancellationToken cancellationToken)
+        {
+            var sendOverride = SendAsyncOverride;
+            return sendOverride != null
+                ? sendOverride(request, completionOption, cancellationToken)
+                : Client.SendAsync(request, completionOption, cancellationToken);
+        }
+
         private static T Deserialize<T>(string text) where T : class
         {
+            if (string.IsNullOrWhiteSpace(text)) return null;
             try
             {
-                var serializer = Plugin.Instance?.ApplicationHost?.Resolve<IJsonSerializer>();
-                return serializer?.DeserializeFromString<T>(text);
+                using var stream = new MemoryStream(Encoding.UTF8.GetBytes(text));
+                var serializer = new DataContractJsonSerializer(typeof(T));
+                return serializer.ReadObject(stream) as T;
             }
             catch
             {
