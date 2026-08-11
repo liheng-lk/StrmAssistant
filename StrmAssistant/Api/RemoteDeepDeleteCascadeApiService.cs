@@ -35,16 +35,22 @@ namespace StrmAssistant.Api
         public int RemoteCandidateCount { get; set; }
         public int UniqueRemotePathCount { get; set; }
         public int RemotePathsVerifiedDeleted { get; set; }
+        public int LocalDeepDeleteItemCount { get; set; }
+        public int LocalDeepDeleteEntriesPlanned { get; set; }
+        public int LocalDeepDeleteItemsCompleted { get; set; }
         public int LocalRootsRequested { get; set; }
         public int LocalRootsDeleted { get; set; }
         public List<string> DeletedRemotePaths { get; set; } = new List<string>();
+        public List<string> DeletedLocalPaths { get; set; } = new List<string>();
+        public List<string> DeletedLocalDirectories { get; set; } = new List<string>();
+        public List<string> SkippedLocalPaths { get; set; } = new List<string>();
         public List<string> DeletedRootItemIds { get; set; } = new List<string>();
         public List<string> Errors { get; set; } = new List<string>();
         public List<string> Warnings { get; set; } = new List<string>();
     }
 
     [Route("/StrmAssistant/DeepDelete/{Id}/CascadePlan", "GET",
-        Summary = "Preview all remote STRM leaves protected before deleting an item/folder")]
+        Summary = "Preview all remote/local STRM leaves protected before deleting an item/folder")]
     [Authenticated(Roles = "Admin")]
     public sealed class GetRemoteDeepDeleteCascadePlan : IReturn<RemoteDeepDeleteCascadePreviewResponse>
     {
@@ -53,7 +59,7 @@ namespace StrmAssistant.Api
     }
 
     [Route("/StrmAssistant/DeepDelete/CascadePlan", "GET",
-        Summary = "Preview all remote STRM leaves protected before a batch item deletion")]
+        Summary = "Preview all remote/local STRM leaves protected before a batch item deletion")]
     [Authenticated(Roles = "Admin")]
     public sealed class GetRemoteDeepDeleteBatchCascadePlan : IReturn<RemoteDeepDeleteCascadePreviewResponse>
     {
@@ -62,7 +68,7 @@ namespace StrmAssistant.Api
     }
 
     [Route("/StrmAssistant/DeepDelete/{Id}/Cascade", "DELETE",
-        Summary = "Execute a previously previewed remote cascade delete using an exact plan hash")]
+        Summary = "Execute a previously previewed mixed deep-delete cascade using an exact plan hash")]
     [Authenticated(Roles = "Admin")]
     public sealed class ExecuteRemoteDeepDeleteCascade : IReturn<RemoteDeepDeleteCascadeApplyResponse>
     {
@@ -72,7 +78,7 @@ namespace StrmAssistant.Api
     }
 
     [Route("/StrmAssistant/DeepDelete/Cascade", "POST",
-        Summary = "Execute a previously previewed batch remote cascade delete using an exact plan hash")]
+        Summary = "Execute a previously previewed batch deep-delete cascade using an exact plan hash")]
     [Authenticated(Roles = "Admin")]
     public sealed class ExecuteRemoteDeepDeleteBatchCascade : IReturn<RemoteDeepDeleteCascadeApplyResponse>
     {
@@ -86,6 +92,7 @@ namespace StrmAssistant.Api
         private readonly ILibraryManager _libraryManager;
         private readonly RemoteDeepDeleteCascadeService _cascade;
         private readonly RemoteDeepDeleteService _remote = new RemoteDeepDeleteService();
+        private readonly DeepDeleteService _local = new DeepDeleteService();
 
         public RemoteDeepDeleteCascadeApiService(ILibraryManager libraryManager)
         {
@@ -147,7 +154,7 @@ namespace StrmAssistant.Api
             if (options?.EnableDeepDelete != true) response.Warnings.Add("Deep Delete is currently disabled.");
             if (!remote.Enabled) response.Warnings.Add("Remote Deep Delete is currently disabled.");
             if (!remote.TreatNotFoundAsSuccess)
-                response.Warnings.Add("Confirmed cascade execution requires TreatNotFoundAsSuccess=true so partial transactions can be retried idempotently.");
+                response.Warnings.Add("Confirmed cascade execution currently requires TreatNotFoundAsSuccess=true. The verified-delete journal protects direct retries, while multi-leaf cascade keeps the stronger global idempotence gate.");
             return response;
         }
 
@@ -173,18 +180,18 @@ namespace StrmAssistant.Api
                 return AddError(result, "Remote Deep Delete is disabled or no provider is selected.");
             if (options.DeepDeleteDryRun)
             {
-                result.Warnings.Add("Dry Run is enabled. No remote object or Emby item was deleted.");
+                result.Warnings.Add("Dry Run is enabled. No remote object, local target, or Emby item was deleted.");
                 return result;
             }
             if (!remoteOptions.TreatNotFoundAsSuccess)
                 return AddError(result,
-                    "Cascade execution requires TreatNotFoundAsSuccess=true for safe retry after partial completion or remote-success/local-failure states.");
+                    "Cascade execution requires TreatNotFoundAsSuccess=true for safe retry across multiple remote leaves and later local phases.");
 
-            // Destructive execution always uses the fixed production safety limit. Preview may request a
-            // lower limit, but a caller cannot raise the execution limit beyond this boundary.
             var plan = _cascade.BuildPlan(roots, RemoteDeepDeleteCascadeService.DefaultMaxRemoteCandidates);
             result.RemoteCandidateCount = plan.RemoteCandidateCount;
             result.UniqueRemotePathCount = plan.UniqueRemotePathCount;
+            result.LocalDeepDeleteItemCount = plan.LocalDeepDeleteItemCount;
+            result.LocalDeepDeleteEntriesPlanned = plan.LocalDeepDeleteEntryCount;
             var actualHash = ComputePlanHash(roots, plan);
             result.PlanHash = actualHash;
             if (!FixedEquals(expectedPlanHash.Trim(), actualHash))
@@ -210,15 +217,42 @@ namespace StrmAssistant.Api
                     if (!string.IsNullOrWhiteSpace(execution?.VerificationError))
                         result.Errors.Add("Verification: " + execution.VerificationError);
                     result.Warnings.Add(
-                        "No new local Emby root deletion was started after this remote failure. Any cloud paths already deleted remain safely retryable because TreatNotFoundAsSuccess is required.");
+                        "No new local target or Emby-root deletion was started after this remote failure. Previously verified cloud deletions remain retryable.");
                     return result;
                 }
                 result.RemotePathsVerifiedDeleted++;
                 result.DeletedRemotePaths.Add(group.First.RemotePlan.RemotePath);
             }
 
-            // Only after every unique remote path is verified missing do we arm deferred MediaInfo cleanup
-            // and let Emby delete the requested local/library roots.
+            // Remote phase is complete. Execute every configured local STRM/symlink target plan before
+            // touching the Emby root tree. A local failure leaves the Emby items intact; the verified
+            // remote journal makes the already-completed cloud phase diagnosable/retryable.
+            foreach (var entry in plan.Entries.Where(entry => entry.RequiresLocalDeepDelete))
+            {
+                if (entry.LocalPlan == null || !entry.LocalDeepDeleteAllowed)
+                {
+                    result.Errors.Add(entry.Error ??
+                                      "A local deep-delete plan became unavailable or disallowed during cascade execution.");
+                    return result;
+                }
+
+                var localExecution = _local.Execute(entry.LocalPlan, options);
+                result.DeletedLocalPaths.AddRange(localExecution.DeletedPaths);
+                result.DeletedLocalDirectories.AddRange(localExecution.DeletedDirectories);
+                result.SkippedLocalPaths.AddRange(localExecution.SkippedPaths);
+                if (localExecution.Errors.Count > 0)
+                {
+                    result.Errors.AddRange(localExecution.Errors.Select(error =>
+                        "Local deep delete " + entry.ItemId + ": " + error));
+                    result.Warnings.Add(
+                        "All remote paths processed before this point remain verified/retryable, but Emby root deletion was not started because a configured local target phase failed.");
+                    return result;
+                }
+                result.LocalDeepDeleteItemsCompleted++;
+            }
+
+            // Only after every remote and configured local target phase succeeds do we arm deferred
+            // MediaInfo cleanup and ask Emby to delete the requested local/library roots.
             var pendingIds = new HashSet<long>();
             foreach (var entry in plan.Entries)
             {
@@ -264,18 +298,17 @@ namespace StrmAssistant.Api
                 }
             }
 
-            // ItemRemoved consumes successful pending entries synchronously/asynchronously. Any leaf still
-            // present after the local phase must retain its persistence/shadow for a later retry.
             foreach (var itemId in pendingIds)
                 if (_libraryManager.GetItemById(itemId) != null)
                     NativeRemoteDeleteDeferredCleanupQueue.CancelPending(itemId);
 
-            result.Executed = result.RemotePathsVerifiedDeleted == result.UniqueRemotePathCount;
+            result.Executed = result.RemotePathsVerifiedDeleted == result.UniqueRemotePathCount &&
+                              result.LocalDeepDeleteItemsCompleted == result.LocalDeepDeleteItemCount;
             result.Success = result.Executed && result.Errors.Count == 0 &&
                              result.LocalRootsDeleted == result.LocalRootsRequested;
             if (!result.Success && result.RemotePathsVerifiedDeleted == result.UniqueRemotePathCount)
                 result.Warnings.Add(
-                    "All cloud targets are verified deleted but one or more local Emby roots remain. Re-preview the remaining item(s) and retry; missing remote objects are treated idempotently.");
+                    "All cloud targets are verified deleted but one or more later local phases remain. Re-preview the remaining item(s) and retry; the transaction layers preserve MediaInfo until ItemRemoved and retain verified-delete retry state when needed.");
             return result;
         }
 
@@ -289,8 +322,6 @@ namespace StrmAssistant.Api
 
         private static IEnumerable<BaseItem> OrderRootsForDeletion(IEnumerable<BaseItem> roots)
         {
-            // Parent-first is intentional. If a selected parent removes another selected child, the child
-            // is subsequently counted as already removed instead of generating a second destructive call.
             return NormalizeRoots(roots).OrderBy(item => SafePathLength(item.Path));
         }
 
@@ -302,15 +333,22 @@ namespace StrmAssistant.Api
         private static string ComputePlanHash(IEnumerable<BaseItem> roots, RemoteDeepDeleteCascadePlan plan)
         {
             var remote = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
+            var local = Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions;
             var builder = new StringBuilder();
-            builder.Append("v1|")
+            builder.Append("v2|")
                 .Append(remote.Enabled).Append('|')
                 .Append(remote.Provider).Append('|')
                 .Append(remote.BaseUrl ?? string.Empty).Append('|')
                 .Append(remote.PathMappings ?? string.Empty).Append('|')
                 .Append(remote.AllowedRemoteRoots ?? string.Empty).Append('|')
                 .Append(remote.TreatNotFoundAsSuccess).Append('|')
-                .Append(remote.DeleteAssociatedSidecars).Append('|');
+                .Append(remote.DeleteAssociatedSidecars).Append('|')
+                .Append(local?.EnableDeepDelete == true).Append('|')
+                .Append(local?.DeepDeleteDryRun == true).Append('|')
+                .Append(local?.DeepDeleteTargetFile == true).Append('|')
+                .Append(local?.DeepDeleteAssociatedFiles == true).Append('|')
+                .Append(local?.DeepDeleteEmptyDirectories == true).Append('|')
+                .Append(local?.DeepDeleteAllowedRoots ?? string.Empty).Append('|');
 
             foreach (var root in NormalizeRoots(roots).OrderBy(item => item.InternalId))
                 builder.Append("R:").Append(root.InternalId).Append(':').Append(NormalizePath(root.Path)).Append('|');
@@ -324,7 +362,19 @@ namespace StrmAssistant.Api
                     .Append(entry.RequiresRemoteDelete).Append(':')
                     .Append(entry.Allowed).Append(':')
                     .Append(entry.RemotePlan?.Provider ?? string.Empty).Append(':')
-                    .Append(entry.RemotePlan?.RemotePath ?? string.Empty).Append('|');
+                    .Append(entry.RemotePlan?.RemotePath ?? string.Empty).Append(':')
+                    .Append(entry.RequiresLocalDeepDelete).Append(':')
+                    .Append(entry.LocalDeepDeleteAllowed).Append(':')
+                    .Append(entry.LocalTargetResolutionFailed).Append('|');
+
+                foreach (var localEntry in (entry.LocalPlan?.Entries ?? new List<DeepDeletePlanEntry>())
+                             .OrderBy(value => value.Path, StringComparer.Ordinal)
+                             .ThenBy(value => value.Kind))
+                {
+                    builder.Append("L:").Append(NormalizePath(localEntry.Path)).Append(':')
+                        .Append(localEntry.Kind).Append(':')
+                        .Append(localEntry.Allowed).Append('|');
+                }
             }
 
             using var sha = SHA256.Create();
