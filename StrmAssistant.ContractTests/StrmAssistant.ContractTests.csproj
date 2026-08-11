@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>StrmAssistant.ContractTests</AssemblyName>
+    <RootNamespace>StrmAssistant.ContractTests</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <EmbyServerCoreVersion Condition="'$(EmbyServerCoreVersion)' == ''">4.8.0.80</EmbyServerCoreVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\StrmAssistant\StrmAssistant.csproj"
+                      AdditionalProperties="EmbyServerCoreVersion=$(EmbyServerCoreVersion)" />
+  </ItemGroup>
+</Project>
