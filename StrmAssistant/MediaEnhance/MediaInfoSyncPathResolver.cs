@@ -29,29 +29,56 @@ namespace StrmAssistant.MediaEnhance
 
         public static MediaInfoSyncPathResolution Resolve(BaseItem item, string sharedRoot, string mappings)
         {
-            var result = new MediaInfoSyncPathResolution();
             if (item == null)
-            {
-                result.Error = "Media item is null.";
-                return result;
-            }
+                return Error("Media item is null.");
 
+            // BaseItem convenience properties may themselves depend on a fully initialized Emby item.
+            // Read them inside the guard so a transient/partially hydrated item cannot escape as an NRE.
+            try
+            {
+                return ResolvePath(item.ContainingFolderPath, item.FileNameWithoutExtension, sharedRoot, mappings);
+            }
+            catch (Exception ex)
+            {
+                return Error("Unable to read the media item's path identity: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Pure path resolver used by the runtime wrapper and behavioral contract tests. This keeps
+        /// cross-host key generation testable without constructing an Emby runtime object graph.
+        /// </summary>
+        internal static MediaInfoSyncPathResolution ResolvePath(string containingFolderPath,
+            string fileNameWithoutExtension, string sharedRoot, string mappings)
+        {
+            var result = new MediaInfoSyncPathResolution();
             if (string.IsNullOrWhiteSpace(sharedRoot))
             {
                 result.Error = "Shared MediaInfo root is empty.";
                 return result;
             }
-
-            if (string.IsNullOrWhiteSpace(item.ContainingFolderPath) ||
-                string.IsNullOrWhiteSpace(item.FileNameWithoutExtension))
+            if (string.IsNullOrWhiteSpace(containingFolderPath) || string.IsNullOrWhiteSpace(fileNameWithoutExtension))
             {
                 result.Error = "The item does not have a usable containing-folder path or filename.";
+                return result;
+            }
+            if (!IsSafeFileStem(fileNameWithoutExtension))
+            {
+                result.Error = "The item filename is unsafe for a MediaInfo sync key.";
                 return result;
             }
 
             try
             {
-                var containingFolder = NormalizeFullPath(item.ContainingFolderPath);
+                var containingFolder = NormalizeFullPath(containingFolderPath);
+                var sharedFullRoot = Path.GetFullPath(TrimQuotes(sharedRoot))
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (string.IsNullOrWhiteSpace(sharedFullRoot))
+                {
+                    result.Error = "Shared MediaInfo root could not be normalized.";
+                    return result;
+                }
+
                 var rules = ParseMappings(mappings)
                     .OrderByDescending(r => r.LocalRoot.Length)
                     .ToList();
@@ -96,7 +123,7 @@ namespace StrmAssistant.MediaEnhance
                     logicalRoot = string.Empty;
                 }
 
-                var fileName = item.FileNameWithoutExtension + MediaInfoSuffix;
+                var fileName = fileNameWithoutExtension + MediaInfoSuffix;
                 var keyParts = new List<string>();
                 if (!string.IsNullOrWhiteSpace(logicalRoot)) keyParts.Add(ToKeyPath(logicalRoot));
                 if (!string.IsNullOrWhiteSpace(relativeDirectory)) keyParts.Add(ToKeyPath(relativeDirectory));
@@ -109,9 +136,14 @@ namespace StrmAssistant.MediaEnhance
                     return result;
                 }
 
-                var jsonPath = Path.Combine(new[] { sharedRoot }
+                var jsonPath = Path.GetFullPath(Path.Combine(new[] { sharedFullRoot }
                     .Concat(syncKey.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
-                    .ToArray());
+                    .ToArray()));
+                if (!IsWithin(jsonPath, sharedFullRoot))
+                {
+                    result.Error = "Resolved MediaInfo JSON path escaped the shared root.";
+                    return result;
+                }
 
                 result.RelativeDirectory = ToKeyPath(relativeDirectory);
                 result.SyncKey = syncKey;
@@ -124,6 +156,11 @@ namespace StrmAssistant.MediaEnhance
                 result.Error = "Unable to resolve MediaInfo sync path: " + ex.Message;
                 return result;
             }
+        }
+
+        private static MediaInfoSyncPathResolution Error(string error)
+        {
+            return new MediaInfoSyncPathResolution { Error = error };
         }
 
         private static IEnumerable<PathMappingRule> ParseMappings(string mappings)
@@ -170,11 +207,18 @@ namespace StrmAssistant.MediaEnhance
 
         private static bool IsWithin(string path, string root)
         {
-            if (string.Equals(path, root, StringComparison.OrdinalIgnoreCase)) return true;
-            var prefix = root + Path.DirectorySeparatorChar;
-            var altPrefix = root + Path.AltDirectorySeparatorChar;
-            return path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
-                   path.StartsWith(altPrefix, StringComparison.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(root)) return false;
+            if (string.Equals(path, root, PathComparison)) return true;
+            var prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                         Path.DirectorySeparatorChar;
+            if (path.StartsWith(prefix, PathComparison)) return true;
+            if (Path.AltDirectorySeparatorChar != Path.DirectorySeparatorChar)
+            {
+                var altPrefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                                Path.AltDirectorySeparatorChar;
+                if (path.StartsWith(altPrefix, PathComparison)) return true;
+            }
+            return false;
         }
 
         private static bool IsSafeRelativePath(string value)
@@ -190,6 +234,13 @@ namespace StrmAssistant.MediaEnhance
             if (string.IsNullOrWhiteSpace(value) || Path.IsPathRooted(value)) return false;
             return value.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
                 .All(segment => segment != "." && segment != "..");
+        }
+
+        private static bool IsSafeFileStem(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value == "." || value == "..") return false;
+            if (value.IndexOf('/') >= 0 || value.IndexOf('\\') >= 0) return false;
+            return value.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
         }
 
         private static bool IsSafeKey(string value)
@@ -209,6 +260,9 @@ namespace StrmAssistant.MediaEnhance
         {
             return (value ?? string.Empty).Trim().Trim('"');
         }
+
+        private static StringComparison PathComparison =>
+            Path.DirectorySeparatorChar == '\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
         private sealed class PathMappingRule
         {
