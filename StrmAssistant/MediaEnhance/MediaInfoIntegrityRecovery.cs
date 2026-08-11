@@ -56,6 +56,7 @@ namespace StrmAssistant.MediaEnhance
         private static readonly object TimerSync = new object();
         private static Timer _timer;
         private static int _draining;
+        private static int _pendingCount;
 
         public static void Start()
         {
@@ -78,6 +79,7 @@ namespace StrmAssistant.MediaEnhance
                 try { _timer?.Dispose(); } catch { }
                 _timer = null;
                 Pending.Clear();
+                Interlocked.Exchange(ref _pendingCount, 0);
                 MediaInfoIntegrityRecoveryQueueState.Status.Started = false;
                 MediaInfoIntegrityRecoveryQueueState.Status.PendingCount = 0;
             }
@@ -94,7 +96,7 @@ namespace StrmAssistant.MediaEnhance
                 return;
             }
 
-            if (Pending.Count >= MaxPending)
+            if (Volatile.Read(ref _pendingCount) >= MaxPending)
             {
                 Increment(status => status.DroppedBecauseFull++);
                 return;
@@ -108,11 +110,16 @@ namespace StrmAssistant.MediaEnhance
                     NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(1)
                 }))
             {
+                var count = Interlocked.Increment(ref _pendingCount);
                 Increment(status =>
                 {
                     status.Queued++;
-                    status.PendingCount = Pending.Count;
+                    status.PendingCount = count;
                 });
+            }
+            else
+            {
+                Increment(status => status.Deduplicated++);
             }
         }
 
@@ -141,17 +148,29 @@ namespace StrmAssistant.MediaEnhance
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     if (!Pending.TryGetValue(candidate.ItemId, out var current)) continue;
-                    var item = manager.GetItemById(candidate.ItemId);
+
+                    BaseItem item;
+                    try
+                    {
+                        item = manager.GetItemById(candidate.ItemId);
+                    }
+                    catch (Exception ex)
+                    {
+                        RegisterFailure(current, null, ex.GetBaseException().Message);
+                        processed++;
+                        continue;
+                    }
+
                     if (item == null || MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
                     {
-                        Pending.TryRemove(candidate.ItemId, out _);
+                        Remove(candidate.ItemId);
                         processed++;
                         continue;
                     }
 
                     if (!MediaInfoIntegrityMonitor.ShouldRecover(item))
                     {
-                        Pending.TryRemove(candidate.ItemId, out _);
+                        Remove(candidate.ItemId);
                         Increment(status =>
                         {
                             status.NoRecoverySource++;
@@ -161,7 +180,8 @@ namespace StrmAssistant.MediaEnhance
                         continue;
                     }
 
-                    bool recovered;
+                    var recovered = false;
+                    string recoveryError = null;
                     try
                     {
                         recovered = await MediaInfoIntegrityMonitor.RecoverAsync(item,
@@ -174,18 +194,12 @@ namespace StrmAssistant.MediaEnhance
                     }
                     catch (Exception ex)
                     {
-                        recovered = false;
-                        Increment(status =>
-                        {
-                            status.FailedAttempts++;
-                            status.LastItemPath = item.Path;
-                            status.LastError = ex.GetBaseException().Message;
-                        });
+                        recoveryError = ex.GetBaseException().Message;
                     }
 
                     if (recovered)
                     {
-                        Pending.TryRemove(candidate.ItemId, out _);
+                        Remove(candidate.ItemId);
                         Increment(status =>
                         {
                             status.Recovered++;
@@ -195,32 +209,61 @@ namespace StrmAssistant.MediaEnhance
                     }
                     else
                     {
-                        current.Attempts++;
-                        Increment(status => status.FailedAttempts++);
-                        if (current.Attempts >= MaxAttempts)
-                        {
-                            Pending.TryRemove(candidate.ItemId, out _);
-                            Increment(status =>
-                            {
-                                status.Exhausted++;
-                                status.LastItemPath = item.Path;
-                                status.LastError = "Local MediaInfo recovery exhausted automatic retries; use the explicit STRM MediaInfo repair task if a remote rebuild is required.";
-                            });
-                        }
-                        else
-                        {
-                            current.NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(30);
-                        }
+                        RegisterFailure(current, item.Path, recoveryError ??
+                            "Validated local MediaInfo recovery returned false.");
                     }
                     processed++;
                 }
                 return processed;
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Increment(status => status.LastError = "Recovery queue drain failed: " + ex.GetBaseException().Message);
+                return processed;
+            }
             finally
             {
-                Increment(status => status.PendingCount = Pending.Count);
+                Increment(status => status.PendingCount = Volatile.Read(ref _pendingCount));
                 Volatile.Write(ref _draining, 0);
             }
+        }
+
+        private static void RegisterFailure(MediaInfoRecoveryCandidate current, string itemPath, string error)
+        {
+            if (current == null) return;
+            current.Attempts++;
+            Increment(status =>
+            {
+                status.FailedAttempts++;
+                status.LastItemPath = itemPath;
+                status.LastError = error;
+            });
+
+            if (current.Attempts >= MaxAttempts)
+            {
+                Remove(current.ItemId);
+                Increment(status =>
+                {
+                    status.Exhausted++;
+                    status.LastItemPath = itemPath;
+                    status.LastError = "Local MediaInfo recovery exhausted automatic retries; use the explicit STRM MediaInfo repair task if a remote rebuild is required. Last error: " + error;
+                });
+            }
+            else
+            {
+                current.NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(30);
+            }
+        }
+
+        private static bool Remove(long itemId)
+        {
+            if (!Pending.TryRemove(itemId, out _)) return false;
+            Interlocked.Decrement(ref _pendingCount);
+            return true;
         }
 
         private static void Increment(Action<MediaInfoIntegrityRecoveryQueueStatus> action)
@@ -316,7 +359,8 @@ namespace StrmAssistant.MediaEnhance
             if (item == null || MediaInfoIntegrityService.IsCoreMediaInfoComplete(item))
                 return Task.FromResult(true);
 
-            var lockIndex = (int)(Math.Abs(item.InternalId) % RecoveryLocks.Length);
+            var lockIndex = (int)(item.InternalId % RecoveryLocks.Length);
+            if (lockIndex < 0) lockIndex = -lockIndex;
             lock (RecoveryLocks[lockIndex])
             {
                 cancellationToken.ThrowIfCancellationRequested();
