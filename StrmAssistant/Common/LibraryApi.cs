@@ -4,6 +4,7 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
@@ -11,12 +12,15 @@ using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Querying;
+using MediaBrowser.Model.Serialization;
+using StrmAssistant.MediaEnhance;
 using StrmAssistant.Options;
 using StrmAssistant.Properties;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using static StrmAssistant.Common.LanguageUtility;
@@ -36,6 +40,7 @@ namespace StrmAssistant.Common
         private readonly IFileSystem _fileSystem;
         private readonly IMediaMountManager _mediaMountManager;
         private readonly IUserManager _userManager;
+        private readonly DistributedMediaInfoProcessor _distributedMediaInfoProcessor;
 
         public static ExtraType[] IncludeExtraTypes =
         {
@@ -110,6 +115,22 @@ namespace StrmAssistant.Common
             _fileSystem = fileSystem;
             _mediaMountManager = mediaMountManager;
             _userManager = userManager;
+
+            try
+            {
+                var itemRepository = Plugin.Instance.ApplicationHost.Resolve<IItemRepository>();
+                var jsonSerializer = Plugin.Instance.ApplicationHost.Resolve<IJsonSerializer>();
+                if (itemRepository != null && jsonSerializer != null)
+                {
+                    _distributedMediaInfoProcessor =
+                        new DistributedMediaInfoProcessor(libraryManager, itemRepository, jsonSerializer);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("Distributed MediaInfo processor initialization failed: {0}", ex.Message);
+                if (Plugin.Instance.DebugMode) _logger.Debug(ex.StackTrace);
+            }
 
             UpdateLibraryPathsInScope();
             FetchUsers();
@@ -423,7 +444,8 @@ namespace StrmAssistant.Common
                 .GroupBy(i => i.InternalId)
                 .Select(g => g.First())
                 .ToList();
-            var results = OrderByDescending(combined);
+            var filtered = MediaExtractionFilter.Apply(combined).ToList();
+            var results = OrderByDescending(filtered);
 
             return results;
         }
@@ -487,7 +509,7 @@ namespace StrmAssistant.Common
                 }
                 else if (item is Video)
                 {
-                    _logger.Debug("MediaInfoExtract - Item dropped: " + item.Name + " - " + item.Path); // video without audio
+                    _logger.Debug("MediaInfoExtract - Item dropped: " + item.Name + " - " + item.Path);
                 }
             }
 
@@ -498,6 +520,13 @@ namespace StrmAssistant.Common
 
         public bool IsExtractNeeded(BaseItem item, bool enableImageCapture)
         {
+            if (MediaExtractionFilter.ShouldSkip(item, out var blacklistReason))
+            {
+                _logger.Info("MediaInfoExtract - Skipped by extraction blacklist: {0} ({1})", item.Path,
+                    blacklistReason);
+                return false;
+            }
+
             if (item.MediaContainer.HasValue && ExcludeMediaContainers.Contains(item.MediaContainer.Value))
                 return false;
 
@@ -645,8 +674,17 @@ namespace StrmAssistant.Common
 
         public async Task<bool?> OrchestrateMediaInfoProcessAsync(BaseItem taskItem, string source, CancellationToken cancellationToken)
         {
-            var persistMediaInfoMode = Plugin.Instance.GetPluginOptions().MediaInfoExtractOptions.PersistMediaInfoMode;
-            var persistMediaInfo = taskItem is Video && persistMediaInfoMode != PersistMediaInfoOption.None.ToString();
+            if (MediaExtractionFilter.ShouldSkip(taskItem, out var blacklistReason))
+            {
+                _logger.Info("MediaInfoExtract - Orchestration skipped by extraction blacklist: {0} ({1})",
+                    taskItem.Path, blacklistReason);
+                return null;
+            }
+
+            var mediaInfoOptions = Plugin.Instance.GetPluginOptions().MediaInfoExtractOptions;
+            var persistMediaInfoMode = mediaInfoOptions.PersistMediaInfoMode;
+            var persistMediaInfo = persistMediaInfoMode != PersistMediaInfoOption.None.ToString() &&
+                                   (taskItem is Video || taskItem is Audio && mediaInfoOptions.PersistMusicMediaInfo);
             var mediaInfoRestoreMode = persistMediaInfoMode == PersistMediaInfoOption.Restore.ToString();
 
             var filePath = taskItem.Path;
@@ -693,7 +731,8 @@ namespace StrmAssistant.Common
 
                 if (deserializeResult)
                 {
-                    if (Plugin.SubtitleApi.HasExternalSubtitleChanged(taskItem, directoryService, true))
+                    if (taskItem is Video &&
+                        Plugin.SubtitleApi.HasExternalSubtitleChanged(taskItem, directoryService, true))
                     {
                         await Plugin.SubtitleApi.UpdateExternalSubtitles(taskItem, refreshOptions, false, true)
                             .ConfigureAwait(false);
@@ -704,6 +743,69 @@ namespace StrmAssistant.Common
             }
 
             if (extractSkip) return null;
+
+            // Route only true MediaInfo misses. An item that already has streams but was queued solely
+            // for image capture must continue through Emby's native provider/image pipeline.
+            if (mediaInfoOptions.EnableDistributedExtractRouting && !HasMediaInfo(taskItem))
+            {
+                if (_distributedMediaInfoProcessor == null)
+                {
+                    _logger.Warn("Distributed MediaInfo routing requested but processor initialization failed.");
+                    if (!mediaInfoOptions.DistributedExtractFallbackToEmby) return null;
+                }
+                else
+                {
+                    var distributedResult = await _distributedMediaInfoProcessor
+                        .ProcessAsync(taskItem, filePath, mediaInfoOptions, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (distributedResult.Success)
+                    {
+                        _logger.Info(
+                            "Distributed MediaInfo - Success: {0}; streams={1}; chapters={2}; rffmpeg={3}",
+                            taskItem.Path, distributedResult.SavedStreamCount, distributedResult.SavedChapterCount,
+                            distributedResult.UsedRffmpegBackend);
+
+                        UpdateDateModifiedLastSaved(taskItem, directoryService);
+
+                        if (taskItem is Video &&
+                            Plugin.SubtitleApi.HasExternalSubtitleChanged(taskItem, directoryService, true))
+                        {
+                            await Plugin.SubtitleApi.UpdateExternalSubtitles(taskItem, refreshOptions, false,
+                                    persistMediaInfo)
+                                .ConfigureAwait(false);
+                        }
+
+                        if (persistMediaInfo)
+                        {
+                            await Plugin.MediaInfoApi.SerializeMediaInfo(taskItem.InternalId, directoryService, true,
+                                    source + " Distributed")
+                                .ConfigureAwait(false);
+                        }
+
+                        return true;
+                    }
+
+                    if (distributedResult.Skipped)
+                    {
+                        _logger.Debug("Distributed MediaInfo - Skipped: {0} ({1})", taskItem.Path,
+                            distributedResult.SkipReason);
+                    }
+                    else
+                    {
+                        _logger.Warn("Distributed MediaInfo - Failed: {0} ({1})", taskItem.Path,
+                            distributedResult.Error);
+
+                        if (!mediaInfoOptions.DistributedExtractFallbackToEmby)
+                        {
+                            _logger.Warn("Distributed MediaInfo - Native fallback is disabled; item will not be probed locally.");
+                            return null;
+                        }
+
+                        _logger.Info("Distributed MediaInfo - Falling back to Emby native extraction: " + taskItem.Path);
+                    }
+                }
+            }
 
             taskItem.DateLastRefreshed = new DateTimeOffset();
 
@@ -816,11 +918,80 @@ namespace StrmAssistant.Common
 
         public async Task<string> GetStrmMountPath(string strmPath)
         {
-            var path = strmPath.AsMemory();
+            using var mediaMount = await MountStrmPath(strmPath).ConfigureAwait(false);
+            return GetMountedPath(mediaMount);
+        }
 
-            using var mediaMount = await _mediaMountManager.Mount(path, null, CancellationToken.None);
-            
-            return mediaMount?.MountedPath;
+        private async Task<IMediaMount> MountStrmPath(string strmPath)
+        {
+            var mountMethod = _mediaMountManager?.GetType()
+                .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .FirstOrDefault(method =>
+                {
+                    if (!string.Equals(method.Name, "Mount", StringComparison.Ordinal)) return false;
+                    var parameters = method.GetParameters();
+                    return parameters.Length == 3 &&
+                           parameters[2].ParameterType == typeof(CancellationToken) &&
+                           (parameters[0].ParameterType == typeof(string) ||
+                            parameters[0].ParameterType == typeof(ReadOnlyMemory<char>));
+                });
+
+            if (mountMethod == null)
+            {
+                _logger.Warn("STRM mount - no compatible IMediaMountManager.Mount overload was found.");
+                return null;
+            }
+
+            var parameters = mountMethod.GetParameters();
+            object invoked;
+            try
+            {
+                invoked = mountMethod.Invoke(_mediaMountManager, new[]
+                {
+                    GetMountArgument(parameters[0].ParameterType, strmPath),
+                    GetMountArgument(parameters[1].ParameterType, null),
+                    (object)CancellationToken.None
+                });
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                throw ex.InnerException;
+            }
+
+            if (!(invoked is Task task))
+                throw new InvalidOperationException("IMediaMountManager.Mount did not return Task.");
+
+            await task.ConfigureAwait(false);
+            return task.GetType().GetProperty("Result", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(task) as IMediaMount;
+        }
+
+        private static object GetMountArgument(Type parameterType, string value)
+        {
+            if (parameterType == typeof(string)) return value;
+            if (parameterType == typeof(ReadOnlyMemory<char>))
+                return value?.AsMemory() ?? ReadOnlyMemory<char>.Empty;
+            return value;
+        }
+
+        private static string GetMountedPath(IMediaMount mediaMount)
+        {
+            if (mediaMount == null) return null;
+
+            var mediaMountType = mediaMount.GetType();
+            if (mediaMountType.GetProperty("MountedPath", BindingFlags.Instance | BindingFlags.Public)
+                    ?.GetValue(mediaMount) is string mountedPath &&
+                !string.IsNullOrWhiteSpace(mountedPath))
+            {
+                return mountedPath;
+            }
+
+            var mountedPathInfo = mediaMountType
+                .GetProperty("MountedPathInfo", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(mediaMount);
+            return mountedPathInfo?.GetType()
+                .GetProperty("FullName", BindingFlags.Instance | BindingFlags.Public)
+                ?.GetValue(mountedPathInfo) as string;
         }
 
         public BaseItem[] GetItemsByIds(long[] itemIds)

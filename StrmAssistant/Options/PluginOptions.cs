@@ -61,6 +61,49 @@ namespace StrmAssistant.Options
             {
                 context.AddValidationError(Resources.InvalidFingerprintCatchup);
             }
+
+            var experience = ExperienceEnhanceOptions;
+            if (experience != null)
+            {
+                // Once this generation of the UI is saved, even an all-default/empty remote-delete
+                // configuration is an explicit user choice and must never fall back to a legacy file.
+                experience.RemoteDeepDeleteUiAuthoritative = true;
+            }
+
+            if (experience?.EnableRemoteDeepDelete == true)
+            {
+                if (!experience.EnableDeepDelete)
+                    context.AddValidationError("启用远程/网盘深度删除前必须先启用“深度删除”总开关。");
+
+                if (experience.RemoteDeepDeleteProvider ==
+                    ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.None)
+                    context.AddValidationError("远程/网盘深度删除必须选择 OpenList 或 WebDav 提供方。");
+
+                if (!Uri.TryCreate(experience.RemoteDeepDeleteBaseUrl, UriKind.Absolute, out var remoteUri) ||
+                    (remoteUri.Scheme != Uri.UriSchemeHttp && remoteUri.Scheme != Uri.UriSchemeHttps))
+                    context.AddValidationError("远程删除 Base URL 必须是有效的 HTTP/HTTPS 绝对地址。");
+
+                if (string.IsNullOrWhiteSpace(experience.RemoteDeepDeleteAllowedRoots))
+                    context.AddValidationError("远程/网盘深度删除必须至少配置一个“允许删除的远端根目录”。");
+
+                if (experience.RemoteDeepDeleteProvider ==
+                        ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.OpenList &&
+                    string.IsNullOrWhiteSpace(experience.RemoteDeepDeleteAccessToken))
+                    context.AddValidationError("OpenList 远程删除需要 Access Token。");
+
+                if (experience.RemoteDeepDeleteAssociatedFiles &&
+                    experience.RemoteDeepDeleteProvider != ExperienceEnhanceOptions.RemoteDeepDeleteProviderOption.OpenList)
+                    context.AddValidationError("“删除 OpenList 远端关联文件”只能与 OpenList 远程删除提供方一起使用。");
+
+                if (experience.RemoteDeepDeleteAssociatedFiles &&
+                    !experience.RemoteDeepDeleteTreatNotFoundAsSuccess)
+                    context.AddValidationError(
+                        "启用“删除 OpenList 远端关联文件”时必须开启“远端对象已不存在时视为成功”，否则主文件已删除后的半完成事务无法安全重试。");
+            }
+            else if (experience?.RemoteDeepDeleteAssociatedFiles == true)
+            {
+                context.AddValidationError("启用“删除 OpenList 远端关联文件”前必须先启用“远程/网盘深度删除”。");
+            }
         }
     }
 }

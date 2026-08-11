@@ -10,10 +10,17 @@ using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Querying;
 using MediaBrowser.Model.Serialization;
+using StrmAssistant.Compatibility;
+using StrmAssistant.Provider;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using static StrmAssistant.Common.LanguageUtility;
@@ -32,6 +39,8 @@ namespace StrmAssistant.Common
 
         private static readonly LruCache LruCache = new LruCache(20);
         private static long _lastRequestTicks;
+        private static readonly Regex MovieDbApiKeyRegex =
+            new Regex("^[a-fA-F0-9]{32}$", RegexOptions.Compiled);
 
         public const int RequestIntervalMs = 100;
         public static readonly TimeSpan DefaultCacheTime = TimeSpan.FromHours(6.0);
@@ -332,6 +341,165 @@ namespace StrmAssistant.Common
             }
 
             return null;
+        }
+
+        public string GetEpisodeGroupLocalPath(Series series)
+        {
+            if (series == null || string.IsNullOrWhiteSpace(series.Path)) return null;
+            return Path.Combine(series.Path, "episodegroup.json");
+        }
+
+        public async Task<EpisodeGroupResponse> FetchOnlineEpisodeGroup(string seriesTmdbId,
+            string episodeGroupId, string language, string localEpisodeGroupPath,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(episodeGroupId)) return null;
+
+            var externalUrl = IsHttpUrl(episodeGroupId);
+            var url = externalUrl
+                ? episodeGroupId.Trim()
+                : BuildMovieDbApiUrl("tv/episode_group/" + episodeGroupId.Trim(), language);
+            if (string.IsNullOrWhiteSpace(url)) return null;
+
+            var stableId = externalUrl ? BuildStableExternalCode(url) : episodeGroupId.Trim();
+            var cacheKey = "tmdb_episode_group_" + (seriesTmdbId ?? "unknown") + "_" + stableId;
+            var cachePath = Path.Combine(Plugin.Instance.ApplicationPaths.CachePath, "tmdb-tv",
+                seriesTmdbId ?? "unknown", stableId + ".json");
+
+            var response = await GetMovieDbResponse<EpisodeGroupResponse>(url, cacheKey, cachePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (response != null && externalUrl && string.IsNullOrWhiteSpace(response.id))
+                response.id = url;
+
+            if (response != null && !string.IsNullOrWhiteSpace(localEpisodeGroupPath))
+            {
+                try
+                {
+                    var parent = Path.GetDirectoryName(localEpisodeGroupPath);
+                    if (!string.IsNullOrWhiteSpace(parent)) _fileSystem.CreateDirectory(parent);
+                    _jsonSerializer.SerializeToFile(ConvertToCompactEpisodeGroup(response), localEpisodeGroupPath);
+                    LruCache.AddOrUpdateCache(localEpisodeGroupPath, response);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warn("EpisodeGroup - Unable to save local episodegroup.json: " + ex.Message);
+                }
+            }
+
+            return response;
+        }
+
+        public async Task<EpisodeGroupResponse> FetchLocalEpisodeGroup(string localEpisodeGroupPath)
+        {
+            if (string.IsNullOrWhiteSpace(localEpisodeGroupPath)) return null;
+
+            if (LruCache.TryGetFromCache(localEpisodeGroupPath, out EpisodeGroupResponse cached))
+                return cached;
+
+            try
+            {
+                var file = _fileSystem.GetFileInfo(localEpisodeGroupPath);
+                if (file?.Exists != true) return null;
+
+                var result = await _jsonSerializer
+                    .DeserializeFromFileAsync<EpisodeGroupResponse>(localEpisodeGroupPath)
+                    .ConfigureAwait(false);
+                if (result != null) LruCache.AddOrUpdateCache(localEpisodeGroupPath, result);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug("EpisodeGroup - Failed to read local episodegroup.json: " + ex.Message);
+                return null;
+            }
+        }
+
+        public string BuildMovieDbApiUrl(string endpoint, string language)
+        {
+            var key = ResolveMovieDbApiKey();
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                _logger.Warn("EpisodeGroup - MovieDb API key is unavailable.");
+                return null;
+            }
+
+            var root = ResolveMovieDbApiRoot();
+            var url = root + "/3/" + endpoint.TrimStart('/') + "?api_key=" + Uri.EscapeDataString(key);
+            if (!string.IsNullOrWhiteSpace(language))
+                url += "&language=" + Uri.EscapeDataString(language);
+            return url;
+        }
+
+        private string ResolveMovieDbApiRoot()
+        {
+            var options = Plugin.Instance?.GetPluginOptions()?.MetadataEnhanceOptions;
+            if (options?.EnableAlternateMovieDbConfig == true &&
+                Uri.TryCreate(options.AlternateMovieDbApiUrl?.Trim(), UriKind.Absolute, out var alternate) &&
+                (alternate.Scheme == Uri.UriSchemeHttp || alternate.Scheme == Uri.UriSchemeHttps))
+                return options.AlternateMovieDbApiUrl.Trim().TrimEnd('/');
+
+            return "https://api.themoviedb.org";
+        }
+
+        private string ResolveMovieDbApiKey()
+        {
+            var options = Plugin.Instance?.GetPluginOptions()?.MetadataEnhanceOptions;
+            var configured = options?.AlternateMovieDbApiKey?.Trim();
+            if (options?.EnableAlternateMovieDbConfig == true &&
+                !string.IsNullOrWhiteSpace(configured) && MovieDbApiKeyRegex.IsMatch(configured))
+                return configured;
+
+            if (!string.IsNullOrWhiteSpace(AlternateMovieDbPatches.SystemApiKey))
+                return AlternateMovieDbPatches.SystemApiKey;
+
+            try
+            {
+                var movieDb = Assembly.Load("MovieDb");
+                var providerBase = movieDb.GetType("MovieDb.MovieDbProviderBase");
+                return providerBase?.GetField("ApiKey", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
+                    ?.GetValue(null) as string;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static CompactEpisodeGroupResponse ConvertToCompactEpisodeGroup(EpisodeGroupResponse response)
+        {
+            if (response == null) return null;
+            return new CompactEpisodeGroupResponse
+            {
+                id = response.id,
+                description = response.description,
+                groups = response.groups?.Select(group => new CompactEpisodeGroup
+                {
+                    name = group.name,
+                    order = group.order,
+                    episodes = group.episodes?.Select(episode => new CompactGroupEpisode
+                    {
+                        episode_number = episode.episode_number,
+                        season_number = episode.season_number,
+                        order = episode.order
+                    }).ToList()
+                }).ToList()
+            };
+        }
+
+        private static bool IsHttpUrl(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri) &&
+                   (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+        }
+
+        private static string BuildStableExternalCode(string value)
+        {
+            using var sha = SHA256.Create();
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value ?? string.Empty));
+            return "external_" + string.Concat(bytes.Take(12).Select(b => b.ToString("x2")));
         }
     }
 }

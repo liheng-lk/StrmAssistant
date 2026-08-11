@@ -1,4 +1,6 @@
-﻿using System;
+using System;
+using System.IO;
+using System.Reflection;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Services;
 using StrmAssistant.Web.Api;
@@ -9,7 +11,33 @@ namespace StrmAssistant.Web.Service
     [Unauthenticated]
     public class ShortcutMenuService : IService, IRequiresRequest
     {
+        private const string SeriesCollectionsLoader = @"
+setTimeout(() => {
+    try {
+        require(['components/strmassistant/seriescollections']).then((responses) => {
+            const module = responses && responses[0];
+            if (module && typeof module.init === 'function') module.init();
+        });
+    } catch (_) {}
+}, 3200);
+";
+
+        private const string SettingsTabsLoader = @"
+setTimeout(() => {
+    try {
+        require(['components/strmassistant/settings-tabs']).then((responses) => {
+            const module = responses && responses[0];
+            if (module && typeof module.init === 'function') module.init();
+        });
+    } catch (_) {}
+}, 1400);
+";
+
         private readonly IHttpResultFactory _resultFactory;
+        private static readonly Lazy<byte[]> SeriesCollectionsJs =
+            new Lazy<byte[]>(() => ReadEmbeddedResource("seriescollections.js"), true);
+        private static readonly Lazy<byte[]> SettingsTabsJs =
+            new Lazy<byte[]>(() => ReadEmbeddedResource("settings-tabs.js"), true);
 
         public ShortcutMenuService(IHttpResultFactory resultFactory)
         {
@@ -24,10 +52,32 @@ namespace StrmAssistant.Web.Service
                 (ReadOnlyMemory<byte>)ShortcutMenuHelper.StrmAssistantJs.GetBuffer(), "application/x-javascript");
         }
 
+        public object Get(GetSeriesCollectionsJs request)
+        {
+            return _resultFactory.GetResult(Request,
+                (ReadOnlyMemory<byte>)SeriesCollectionsJs.Value, "application/x-javascript");
+        }
+
+        public object Get(GetSettingsTabsJs request)
+        {
+            return _resultFactory.GetResult(Request,
+                (ReadOnlyMemory<byte>)SettingsTabsJs.Value, "application/x-javascript");
+        }
+
         public object Get(GetShortcutMenu request)
         {
-            return _resultFactory.GetResult(ShortcutMenuHelper.ModifiedShortcutsString.AsSpan(),
-                "application/x-javascript");
+            var javascript = ShortcutMenuHelper.ModifiedShortcutsString + SeriesCollectionsLoader + SettingsTabsLoader;
+            return _resultFactory.GetResult(javascript.AsSpan(), "application/x-javascript");
+        }
+
+        private static byte[] ReadEmbeddedResource(string resourceName)
+        {
+            var name = typeof(Plugin).Namespace + ".Web.Resources." + resourceName;
+            using var stream = typeof(ShortcutMenuService).GetTypeInfo().Assembly.GetManifestResourceStream(name);
+            if (stream == null) return Array.Empty<byte>();
+            using var destination = new MemoryStream();
+            stream.CopyTo(destination);
+            return destination.ToArray();
         }
     }
 }

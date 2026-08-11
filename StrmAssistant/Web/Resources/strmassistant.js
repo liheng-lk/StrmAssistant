@@ -1,5 +1,143 @@
 ﻿define(['connectionManager', 'globalize', 'loading', 'toast', 'confirm', 'dialog'], function (connectionManager, globalize, loading, toast, confirm, dialog) {
 
+    function getDeepDeleteLabel() {
+        const locale = globalize.getCurrentLocale().toLowerCase();
+        return locale === 'zh-cn' ? '深度删除' :
+            (['zh-hk', 'zh-tw'].includes(locale) ? '深度刪除' : 'Deep Delete');
+    }
+
+    function formatDeepDeletePlan(plan) {
+        const lines = [];
+        if (plan.ItemName) lines.push(plan.ItemName);
+        if (plan.SourcePath) lines.push(plan.SourcePath);
+        lines.push('');
+
+        const entries = plan.Entries || [];
+        if (entries.length) {
+            lines.push('Targets:');
+            entries.slice(0, 30).forEach(entry => {
+                lines.push((entry.Allowed ? '✓ ' : '✗ ') + entry.Path);
+            });
+            if (entries.length > 30) lines.push(`... +${entries.length - 30}`);
+        }
+
+        const warnings = plan.Warnings || [];
+        if (warnings.length) {
+            lines.push('');
+            lines.push('Warnings:');
+            warnings.forEach(value => lines.push('- ' + value));
+        }
+
+        if (plan.DryRun) {
+            lines.push('');
+            lines.push('Dry Run is enabled. Nothing will actually be deleted.');
+        }
+
+        return lines.join('\n');
+    }
+
+    function getMaintenanceLabel(kind) {
+        const locale = globalize.getCurrentLocale().toLowerCase();
+        if (kind === 'ThumbnailCache') {
+            return locale === 'zh-cn' ? '清除章节图/BIF缓存' :
+                (['zh-hk', 'zh-tw'].includes(locale) ? '清除章節圖/BIF快取' : 'Clear Chapter/BIF Cache');
+        }
+        return locale === 'zh-cn' ? '清除媒体信息' :
+            (['zh-hk', 'zh-tw'].includes(locale) ? '清除媒體資訊' : 'Clear MediaInfo');
+    }
+
+    function formatMaintenancePlan(plan, kind) {
+        const lines = [];
+        if (plan.ItemName) lines.push(plan.ItemName);
+        if (plan.ItemPath) lines.push(plan.ItemPath);
+        lines.push('');
+
+        if (kind === 'ThumbnailCache') {
+            lines.push(`Chapters: ${plan.ChapterCount || 0}`);
+            lines.push(`Chapter image references: ${plan.ChapterImageReferenceCount || 0}`);
+        } else {
+            lines.push(`Media streams: ${plan.MediaStreamCount || 0}`);
+            if (plan.PersistedMediaInfoJson) lines.push(`Persisted JSON: ${plan.PersistedMediaInfoJson}`);
+        }
+
+        const paths = plan.Paths || [];
+        if (paths.length) {
+            lines.push('');
+            lines.push('Paths:');
+            paths.slice(0, 30).forEach(path => lines.push('- ' + path));
+            if (paths.length > 30) lines.push(`... +${paths.length - 30}`);
+        }
+
+        const warnings = plan.Warnings || [];
+        if (warnings.length) {
+            lines.push('');
+            lines.push('Warnings:');
+            warnings.forEach(value => lines.push('- ' + value));
+        }
+
+        return lines.join('\n');
+    }
+
+    function runMaintenance(itemId, itemName, kind) {
+        const apiClient = connectionManager.currentApiClient();
+        const label = getMaintenanceLabel(kind);
+        const planApi = apiClient.getUrl(`StrmAssistant/Maintenance/${itemId}/${kind}/Plan`);
+
+        loading.show();
+        return apiClient.ajax({
+            type: 'GET',
+            url: planApi,
+            dataType: 'json'
+        }).then(plan => {
+            loading.hide();
+            if (!plan || plan.Success === false || (plan.Errors && plan.Errors.length)) {
+                toast(plan?.Errors?.join('\n') || label + ' plan failed');
+                return;
+            }
+
+            return confirm({
+                text: formatMaintenancePlan(plan, kind),
+                title: label + ' - ' + (itemName || ''),
+                confirmText: globalize.translate('Clear'),
+                primary: 'cancel'
+            }).then(function () {
+                loading.show();
+                let executeApi = apiClient.getUrl(`StrmAssistant/Maintenance/${itemId}/${kind}/Clear`);
+                executeApi += '?Confirm=true';
+                if (kind === 'MediaInfo') executeApi += '&DeletePersistedJson=true';
+
+                return apiClient.ajax({
+                    type: 'POST',
+                    url: executeApi,
+                    data: {},
+                    dataType: 'json',
+                    contentType: 'application/json'
+                }).then(result => {
+                    loading.hide();
+                    if (!result) {
+                        toast(label + ' failed');
+                        return;
+                    }
+                    if (result.Errors && result.Errors.length) {
+                        toast(result.Errors.join('\n'));
+                        return;
+                    }
+                    if (result.Success && result.Executed) {
+                        toast(label + ' Success');
+                    } else {
+                        toast((result.Warnings || []).join('\n') || label + ' not executed');
+                    }
+                }).catch(error => {
+                    loading.hide();
+                    toast(error?.message || label + ' failed');
+                });
+            });
+        }).catch(error => {
+            loading.hide();
+            toast(error?.message || label + ' plan failed');
+        });
+    }
+
     return {
         copy: function (libraryId) {
             loading.show();
@@ -15,7 +153,7 @@
             }).finally(() => {
                 loading.hide();
                 const locale = globalize.getCurrentLocale().toLowerCase();
-                const confirmMessage = (locale === 'zh-cn') ? '\u590d\u5236\u5a92\u4f53\u5e93\u6210\u529f' : 
+                const confirmMessage = (locale === 'zh-cn') ? '\u590d\u5236\u5a92\u4f53\u5e93\u6210\u529f' :
                     (['zh-hk', 'zh-tw'].includes(locale) ? '\u8907\u88fd\u5a92\u9ad4\u5eab\u6210\u529f' : 'Copy Library Success');
                 toast(confirmMessage);
                 const itemsContainer = document.querySelector('.view-librarysetup-library .itemsContainer, .view-librarysetup-librarysetup .itemsContainer');
@@ -36,25 +174,110 @@
                 loading.show();
 
                 let apiClient = connectionManager.currentApiClient();
-                let deleteApi = apiClient.getUrl('Library/VirtualFolders/Delete');
+                let deleteApi = apiClient.getUrl('StrmAssistant/Library/Collections/Delete');
 
-                apiClient.ajax({
+                return apiClient.ajax({
                     type: "POST",
-                    url: deleteApi + "?refreshLibrary=false&id=" + libraryId,
-                    data: {},
+                    url: deleteApi,
+                    data: JSON.stringify({ Id: libraryId }),
                     contentType: "application/json"
-                }).finally(() => {
-                    loading.hide();
+                }).then(() => {
                     const locale = globalize.getCurrentLocale().toLowerCase();
-                    const confirmMessage = (locale === 'zh-cn') ? '\u5408\u96c6\u5220\u9664\u6210\u529f' : 
-                        (['zh-hk', 'zh-tw'].includes(locale) ? '\u5408\u96C6\u5236\u9662\u6210\u529F' : 'Delete Collections Success');
+                    const confirmMessage = (locale === 'zh-cn') ? '\u5408\u96c6\u5220\u9664\u6210\u529f' :
+                        (['zh-hk', 'zh-tw'].includes(locale) ? '\u5408\u96C6\u522A\u9664\u6210\u529F' : 'Delete Collections Success');
                     toast(confirmMessage);
                     const itemsContainer = document.querySelector('.view-librarysetup-library .itemsContainer, .view-librarysetup-librarysetup .itemsContainer');
                     if (itemsContainer) {
                         itemsContainer.notifyRefreshNeeded(true);
                     }
+                }).catch(error => {
+                    toast(error?.message || 'Delete Collections failed');
+                }).finally(() => {
+                    loading.hide();
                 });
             });
+        },
+
+        deepdelete: function (itemId, itemName) {
+            let apiClient = connectionManager.currentApiClient();
+            const label = getDeepDeleteLabel();
+            const planApi = apiClient.getUrl(`StrmAssistant/DeepDelete/${itemId}/Plan`);
+
+            loading.show();
+            return apiClient.ajax({
+                type: 'GET',
+                url: planApi,
+                dataType: 'json'
+            }).then(plan => {
+                loading.hide();
+
+                if (!plan || (plan.Errors && plan.Errors.length)) {
+                    const error = plan?.Errors?.join('\n') || 'Unable to build deep-delete plan.';
+                    toast(error);
+                    return;
+                }
+
+                const blocked = (plan.Entries || []).some(entry => !entry.Allowed);
+                if (blocked) {
+                    toast((plan.Errors || []).concat(plan.Warnings || []).join('\n') ||
+                        'Deep delete contains blocked paths. Check allowed roots.');
+                    return;
+                }
+
+                return confirm({
+                    text: formatDeepDeletePlan(plan),
+                    title: label + ' - ' + (itemName || ''),
+                    confirmText: plan.DryRun ? 'Dry Run' : globalize.translate('Delete'),
+                    primary: 'cancel'
+                }).then(function () {
+                    loading.show();
+                    const executeApi = apiClient.getUrl(`StrmAssistant/DeepDelete/${itemId}`);
+                    return apiClient.ajax({
+                        type: 'DELETE',
+                        url: executeApi + '?Confirm=true',
+                        data: {},
+                        dataType: 'json',
+                        contentType: 'application/json'
+                    }).then(result => {
+                        loading.hide();
+                        if (!result) {
+                            toast(label + ' failed');
+                            return;
+                        }
+
+                        if (result.Errors && result.Errors.length) {
+                            toast(result.Errors.join('\n'));
+                            return;
+                        }
+
+                        if (result.DryRun && !result.Executed) {
+                            toast(label + ': Dry Run');
+                            return;
+                        }
+
+                        if (result.Success && result.Executed) {
+                            toast(label + ' Success');
+                            setTimeout(() => window.history.back(), 800);
+                        } else {
+                            toast((result.Warnings || []).join('\n') || label + ' not executed');
+                        }
+                    }).catch(error => {
+                        loading.hide();
+                        toast(error?.message || label + ' failed');
+                    });
+                });
+            }).catch(error => {
+                loading.hide();
+                toast(error?.message || label + ' plan failed');
+            });
+        },
+
+        clear_thumbnails: function (itemId, itemName) {
+            return runMaintenance(itemId, itemName, 'ThumbnailCache');
+        },
+
+        clear_mediainfo: function (itemId, itemName) {
+            return runMaintenance(itemId, itemName, 'MediaInfo');
         },
 
         traverse: function (itemId) {
@@ -143,7 +366,7 @@
                 }).finally(() => {
                     loading.hide();
                     const locale = globalize.getCurrentLocale().toLowerCase();
-                    const confirmMessage = (locale === 'zh-cn') ? '\u5220\u9664\u7248\u672C\u6210\u529F' : 
+                    const confirmMessage = (locale === 'zh-cn') ? '\u5220\u9664\u7248\u672C\u6210\u529F' :
                         (['zh-hk', 'zh-tw'].includes(locale) ? '\u524A\u9664\u7248\u672C\u6210\u529F' : 'Delete Version Success');
                     toast(confirmMessage);
                 });
@@ -168,7 +391,7 @@
 
         clear_intro: function (itemId) {
             const locale = globalize.getCurrentLocale().toLowerCase();
-            const commandName = locale === 'zh-cn' ? '\u6E05\u9664\u7247\u5934\u6807\u8BB0' : 
+            const commandName = locale === 'zh-cn' ? '\u6E05\u9664\u7247\u5934\u6807\u8BB0' :
                     (['zh-hk', 'zh-tw'].includes(locale) ? '\u6E05\u9664\u7247\u982D\u6A19\u8A18' : 'Clear Intro Markers');
             confirm({
                 text: globalize.translate('AreYouSureToContinue'),
@@ -187,7 +410,7 @@
                     contentType: "application/json"
                 }).finally(() => {
                     loading.hide();
-                    const confirmMessage = (locale === 'zh-cn') ? commandName + '\u6210\u529F' : 
+                    const confirmMessage = (locale === 'zh-cn') ? commandName + '\u6210\u529F' :
                         (['zh-hk', 'zh-tw'].includes(locale) ? commandName + '\u6210\u529F' : commandName + ' Success');
                     toast(confirmMessage);
                 });

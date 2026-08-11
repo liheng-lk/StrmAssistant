@@ -1,9 +1,14 @@
 name: Build Plugin
 
 on:
+  push:
+    branches:
+      - main
+      - "agent/**"
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build:
@@ -25,13 +30,26 @@ jobs:
       - name: Validate embedded JavaScript
         shell: pwsh
         run: |
-          node --check StrmAssistant/Web/Resources/strmassistant.js
-          node --check StrmAssistant/Web/Resources/shortcuts.js
+          $scripts = Get-ChildItem StrmAssistant/Web/Resources -Filter *.js -File
+          if (-not $scripts) { throw "No embedded JavaScript resources were found." }
+          foreach ($script in $scripts) {
+            Write-Host "Checking $($script.FullName)"
+            node --check $script.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+
+      - name: Run behavioral contract tests
+        shell: pwsh
+        run: |
+          dotnet run --project StrmAssistant.ContractTests/StrmAssistant.ContractTests.csproj `
+            --configuration Release `
+            -p:EmbyServerCoreVersion=${{ matrix.emby_core }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install ILRepack
         shell: pwsh

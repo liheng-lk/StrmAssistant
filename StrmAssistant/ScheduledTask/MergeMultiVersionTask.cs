@@ -361,26 +361,50 @@ namespace StrmAssistant.ScheduledTask
 
                 var total = rootIdGroups.Count;
                 var current = 0;
+                var maxMergedMovieVersions = Math.Max(0,
+                    Plugin.Instance.GetPluginOptions().ExperienceEnhanceOptions.MaxMergedMovieVersions);
 
                 foreach (var group in rootIdGroups)
                 {
-                    var movies = group
+                    var allGroupMovies = group
                         .SelectMany(
                             rootId => movieLookup.TryGetValue(rootId, out var m) ? m : Enumerable.Empty<Movie>())
                         .GroupBy(m => m.InternalId)
                         .Select(g => g.First())
-                        .OfType<BaseItem>()
+                        .OrderBy(m => m.InternalId)
                         .ToArray();
 
-                    _libraryManager.MergeItems(movies);
+                    var selectedMovies = maxMergedMovieVersions > 0
+                        ? allGroupMovies.Take(maxMergedMovieVersions).OfType<BaseItem>().ToArray()
+                        : allGroupMovies.OfType<BaseItem>().ToArray();
+                    var skippedMovies = maxMergedMovieVersions > 0
+                        ? allGroupMovies.Skip(maxMergedMovieVersions).ToArray()
+                        : Array.Empty<Movie>();
 
-                    foreach (var item in movies)
+                    if (selectedMovies.Length >= 2)
                     {
-                        _logger.Info($"MergeMultiVersion - Movie merged: {item.Name} - {item.Path}");
+                        _libraryManager.MergeItems(selectedMovies);
+
+                        foreach (var item in selectedMovies)
+                        {
+                            _logger.Info($"MergeMultiVersion - Movie merged: {item.Name} - {item.Path}");
+                        }
+                    }
+                    else
+                    {
+                        _logger.Info(
+                            $"MergeMultiVersion - Group merge skipped because configured MaxMergedMovieVersions={maxMergedMovieVersions} leaves fewer than two selected items");
+                    }
+
+                    foreach (var item in skippedMovies)
+                    {
+                        _logger.Info(
+                            $"MergeMultiVersion - Movie kept independent by MaxMergedMovieVersions={maxMergedMovieVersions}: {item.Name} - {item.Path}");
                     }
 
                     current++;
-                    _logger.Info($"MergeMultiVersion - Merged group {current} of {total} with {movies.Length} items");
+                    _logger.Info(
+                        $"MergeMultiVersion - Processed group {current} of {total}: total={allGroupMovies.Length}, merged={selectedMovies.Length}, independent={skippedMovies.Length}");
 
                     var progress = (double)current / total * 100;
                     groupProgress?.Report(progress);

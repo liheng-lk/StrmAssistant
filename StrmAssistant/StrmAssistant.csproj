@@ -1,34 +1,50 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFrameworks>netstandard2.1</TargetFrameworks>
-    <AssemblyVersion>2.0.0.27</AssemblyVersion>
-    <FileVersion>2.0.0.27</FileVersion>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Version>2.0.7</Version>
+    <AssemblyVersion>2.0.7.0</AssemblyVersion>
+    <FileVersion>2.0.7.0</FileVersion>
     <CopyLocalLockFileAssemblies>True</CopyLocalLockFileAssemblies>
     <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
-    <AssemblyName>$(MSBuildProjectName)Lite</AssemblyName>
+    <AssemblyName>StrmAssistantCustom</AssemblyName>
+    <EmbyServerCoreVersion Condition="'$(EmbyServerCoreVersion)' == ''">4.8.0.80</EmbyServerCoreVersion>
+    <PluginOutputDir Condition="'$(PluginOutputDir)' == ''">$(MSBuildProjectDirectory)\..\artifacts</PluginOutputDir>
+    <PluginBuildDir>$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)</PluginBuildDir>
+    <PluginOutputPath>$(PluginOutputDir)\$(AssemblyName).dll</PluginOutputPath>
+    <PluginInputPath>$(PluginBuildDir)\$(AssemblyName).dll</PluginInputPath>
+    <ChineseConverterPath>$(PluginBuildDir)\ChineseConverter.dll</ChineseConverterPath>
+    <TinyPinyinPath>$(PluginBuildDir)\TinyPinyin.dll</TinyPinyinPath>
+    <HarmonyPath>$(PkgLib_Harmony)\lib\net6.0\0Harmony.dll</HarmonyPath>
+    <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' == 'Windows_NT'">$(UserProfile)\.dotnet\tools\ilrepack.exe</ILRepackExe>
+    <ILRepackExe Condition="'$(ILRepackExe)' == '' and '$(OS)' != 'Windows_NT'">$(HOME)/.dotnet/tools/ilrepack</ILRepackExe>
   </PropertyGroup>
   <ItemGroup>
     <None Remove="Web\Resources\shortcuts.js" />
     <None Remove="Web\Resources\strmassistant.js" />
+    <None Remove="Web\Resources\seriescollections.js" />
+    <None Remove="Web\Resources\settings-tabs.js" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Properties\thumb.png" />
     <EmbeddedResource Include="Web\Resources\shortcuts.js" />
     <EmbeddedResource Include="Web\Resources\strmassistant.js" />
+    <EmbeddedResource Include="Web\Resources\seriescollections.js" />
+    <EmbeddedResource Include="Web\Resources\settings-tabs.js" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="CHTCHSConv" Version="1.0.0">
-    </PackageReference>
+    <PackageReference Include="CHTCHSConv" Version="1.0.0" />
     <PackageReference Include="ILRepack" Version="2.0.42">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="mediabrowser.server.core" Version="4.8.0.80" />
+    <PackageReference Include="Lib.Harmony" Version="2.3.6" GeneratePathProperty="true" />
+    <PackageReference Include="mediabrowser.server.core" Version="$(EmbyServerCoreVersion)" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Resource.Embedder" Version="2.2.0" />
+    <PackageReference Include="TinyPinyin" Version="1.1.0" />
   </ItemGroup>
   <ItemGroup>
     <Compile Update="Properties\Resources.Designer.cs">
@@ -49,7 +65,19 @@
       <DependentUpon>Resources.resx</DependentUpon>
     </EmbeddedResource>
   </ItemGroup>
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="$(ILRepack) /out:%25AppData%25\Emby-Server\programdata\plugins\$(TargetFileName) $(TargetPath) $(TargetDir)ChineseConverter.dll /lib:$(TargetDir)" />
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>StrmAssistant.ContractTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <Target Name="PackagePlugin" DependsOnTargets="Build">
+    <Message Importance="High" Text="Harmony runtime asset: $(HarmonyPath)" />
+    <Error Condition="!Exists('$(ILRepackExe)')" Text="ILRepack tool not found at $(ILRepackExe). Install it with: dotnet tool install -g dotnet-ilrepack" />
+    <Error Condition="!Exists('$(PluginInputPath)')" Text="Plugin input not found at $(PluginInputPath)" />
+    <Error Condition="!Exists('$(ChineseConverterPath)')" Text="ChineseConverter input not found at $(ChineseConverterPath)" />
+    <Error Condition="!Exists('$(TinyPinyinPath)')" Text="TinyPinyin input not found at $(TinyPinyinPath)" />
+    <Error Condition="!Exists('$(HarmonyPath)')" Text="Harmony net6 runtime assembly was not found at $(HarmonyPath)." />
+    <MakeDir Directories="$(PluginOutputDir)" />
+    <Exec Command="&quot;$(ILRepackExe)&quot; /out:&quot;$(PluginOutputPath)&quot; &quot;$(PluginInputPath)&quot; &quot;$(HarmonyPath)&quot; &quot;$(ChineseConverterPath)&quot; &quot;$(TinyPinyinPath)&quot; /lib:&quot;$(PluginBuildDir)&quot; /lib:&quot;$(PkgLib_Harmony)\lib\net6.0&quot;" />
   </Target>
 </Project>
