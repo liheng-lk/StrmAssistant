@@ -49,6 +49,9 @@ namespace StrmAssistant.Api
         public OpenListRemoteSidecarDeleteStatus OpenListSidecars { get; set; }
         public NativeItemDeleteRemoteBridgeStatus NativeDeleteBridge { get; set; }
         public NativeRemoteDeleteTransactionStatus NativeDeleteTransaction { get; set; }
+        public NativeRemoteDeleteDeferredCleanupStatus DeferredDeleteCleanup { get; set; }
+        public NativeCascadeDeleteRemoteGuardStatus NativeCascadeDeleteGuard { get; set; }
+        public RemoteDeepDeleteTransactionJournalStatus RemoteDeleteJournal { get; set; }
         public string RemoteProvider { get; set; }
         public string RemoteEndpointHost { get; set; }
         public bool RemoteDeleteEnabled { get; set; }
@@ -101,6 +104,9 @@ namespace StrmAssistant.Api
                 OpenListSidecars = OpenListRemoteSidecarDeleteState.Status,
                 NativeDeleteBridge = NativeItemDeleteRemoteBridgeState.Status,
                 NativeDeleteTransaction = NativeRemoteDeleteTransactionState.Status,
+                DeferredDeleteCleanup = NativeRemoteDeleteDeferredCleanupState.Status,
+                NativeCascadeDeleteGuard = NativeCascadeDeleteRemoteGuardState.Status,
+                RemoteDeleteJournal = RemoteDeepDeleteTransactionJournalState.Status,
                 RemoteProvider = remote.Provider.ToString(),
                 RemoteDeleteEnabled = remote.Enabled,
                 RemoteEndpointHost = SafeHost(remote.BaseUrl),
@@ -147,6 +153,15 @@ namespace StrmAssistant.Api
                     result.Warnings.Add("Direct remote deep-delete API integration is not active.");
                 if (result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched <= 0)
                     result.Warnings.Add("No native single-item Emby delete route is bridged to remote deletion.");
+                if (result.DeferredDeleteCleanup?.ImmediateCleanupSuppressed != true ||
+                    result.DeferredDeleteCleanup?.CleanupTargetsPatched < 2)
+                    result.Warnings.Add("MediaInfo cleanup is not fully deferred until confirmed ItemRemoved for both native and plugin-owned deep-delete paths.");
+                if (result.NativeCascadeDeleteGuard?.SingleDeleteTargetsPatched <= 0)
+                    result.Warnings.Add("No native single-item parent/folder delete route is protected by recursive remote-cascade inspection.");
+                if (result.NativeCascadeDeleteGuard?.BatchDeleteTargetsPatched <= 0)
+                    result.Warnings.Add("No native batch /Items delete route is protected by recursive remote-cascade inspection.");
+                if (result.RemoteDeleteJournal?.ExecuteAsyncPatched != true)
+                    result.Warnings.Add("Verified remote-delete retry journal is inactive; remote-success/local-failure retries may be unsafe when TreatNotFoundAsSuccess is disabled.");
                 if (result.RemotePlanSafety?.Patched != true)
                     result.Warnings.Add("Remote destructive mapping path-boundary safety is inactive.");
                 if (remote.Provider == RemoteDeepDeleteProviderType.OpenList && result.RemoteProbeSafety?.Patched != true)
@@ -156,14 +171,23 @@ namespace StrmAssistant.Api
                 if (remote.DeleteAssociatedSidecars && remote.Provider != RemoteDeepDeleteProviderType.OpenList)
                     result.Warnings.Add("Remote sidecar cleanup is enabled but currently implemented only for OpenList.");
                 if (remote.DeleteAssociatedSidecars && !remote.TreatNotFoundAsSuccess)
-                    result.Warnings.Add("Remote sidecar cleanup requires TreatNotFoundAsSuccess=true for idempotent retry after partial completion.");
+                    result.Warnings.Add("Remote sidecar cleanup currently requires TreatNotFoundAsSuccess=true for its confirmed cascade transaction path.");
                 if (remote.DeleteAssociatedSidecars && result.OpenListSidecars?.ExecuteAsyncPatched != true)
                     result.Warnings.Add("OpenList sidecar cleanup is enabled but its ExecuteAsync transaction extension is inactive.");
             }
 
+            if (result.DeferredDeleteCleanup?.PendingCount > 0)
+                result.Warnings.Add(result.DeferredDeleteCleanup.PendingCount +
+                                    " deep-delete item(s) are waiting for an Emby ItemRemoved confirmation before MediaInfo/shadow cleanup.");
+            if (result.RemoteDeleteJournal?.ActiveEntries > 0)
+                result.Warnings.Add(result.RemoteDeleteJournal.ActiveEntries +
+                                    " verified remote-delete journal entr" +
+                                    (result.RemoteDeleteJournal.ActiveEntries == 1 ? "y is" : "ies are") +
+                                    " retained for safe retry until local deletion succeeds or the entry expires.");
+
             if (result.NativeDeleteTransaction?.LocalDeletesFailedAfterRemoteSuccess > 0 ||
                 result.NativeDeleteTransaction?.LocalItemsStillPresentAfterRemoteSuccess > 0)
-                result.Warnings.Add("An irreversible remote-success/local-delete failure has previously been observed. Inspect NativeDeleteTransaction.");
+                result.Warnings.Add("A remote-success/local-delete partial state has previously been observed. Inspect NativeDeleteTransaction, DeferredDeleteCleanup and RemoteDeleteJournal; the new transaction layers preserve local MediaInfo and support bounded retry instead of treating the state as irrecoverable.");
 
             if (result.Inventory?.Included == true)
             {
@@ -182,6 +206,11 @@ namespace StrmAssistant.Api
                                  result.RemoteCredentialsConfigured &&
                                  result.RemoteDeepDelete?.DirectApiIntegration == true &&
                                  result.NativeDeleteBridge?.ExplicitDeleteTargetsPatched > 0 &&
+                                 result.DeferredDeleteCleanup?.ImmediateCleanupSuppressed == true &&
+                                 result.DeferredDeleteCleanup?.CleanupTargetsPatched >= 2 &&
+                                 result.NativeCascadeDeleteGuard?.SingleDeleteTargetsPatched > 0 &&
+                                 result.NativeCascadeDeleteGuard?.BatchDeleteTargetsPatched > 0 &&
+                                 result.RemoteDeleteJournal?.ExecuteAsyncPatched == true &&
                                  result.RemotePlanSafety?.Patched == true &&
                                  (!result.RemoteUiIsAuthoritative || result.RemoteUiAuthority?.Patched == true) &&
                                  (remote.Provider != RemoteDeepDeleteProviderType.OpenList ||
