@@ -21,6 +21,7 @@ internal static class MediaAndSearchContractTests
             ("MediaInfo sync mapping creates stable logical key", MediaInfoSyncCreatesStableLogicalKey),
             ("MediaInfo sync mapping enforces local-root path boundary", MediaInfoSyncMappingBoundary),
             ("MediaInfo sync rejects unsafe logical mapping and stays under shared root", MediaInfoSyncRejectsUnsafeLogicalRoot),
+            ("MediaInfo sync BaseItem wrapper converts transient getter exceptions to failure", MediaInfoSyncBaseItemWrapperFailsSafely),
             ("Advanced Chinese FTS tokenizer detection recognizes simple", FtsDetectsSimpleTokenizer),
             ("Advanced Chinese FTS tokenizer detection recognizes unicode61", FtsDetectsUnicodeTokenizer),
             ("Advanced Chinese FTS migration script is transactional and targets one FTS table", FtsMigrationScriptIsTransactional),
@@ -105,8 +106,7 @@ internal static class MediaAndSearchContractTests
             var localRoot = Directory.CreateDirectory(Path.Combine(root, "local-media")).FullName;
             var season = Directory.CreateDirectory(Path.Combine(localRoot, "Series", "Season 01")).FullName;
             var shared = Directory.CreateDirectory(Path.Combine(root, "shared")).FullName;
-            var item = CreateItem("Episode", Path.Combine(season, "S01E01.mkv"));
-            var result = MediaInfoSyncPathResolver.Resolve(item, shared, localRoot + " => tv");
+            var result = MediaInfoSyncPathResolver.ResolvePath(season, "S01E01", shared, localRoot + " => tv");
 
             AssertTrue(result.Success, "Sync resolution failed: " + result.Error);
             AssertTrue(result.MappingMatched, "Expected mapping to match.");
@@ -124,9 +124,8 @@ internal static class MediaAndSearchContractTests
             var colliding = Directory.CreateDirectory(Path.Combine(root, "media-extra")).FullName;
             var folder = Directory.CreateDirectory(Path.Combine(media, "Movie")).FullName;
             var shared = Directory.CreateDirectory(Path.Combine(root, "shared")).FullName;
-            var item = CreateItem("Movie", Path.Combine(folder, "movie.mkv"));
             var mappings = colliding + " => wrong\n" + media + " => correct";
-            var result = MediaInfoSyncPathResolver.Resolve(item, shared, mappings);
+            var result = MediaInfoSyncPathResolver.ResolvePath(folder, "movie", shared, mappings);
 
             AssertTrue(result.Success, "Sync resolution failed: " + result.Error);
             AssertTrue(result.SyncKey.Replace('\\', '/').StartsWith("correct/", StringComparison.Ordinal),
@@ -141,13 +140,30 @@ internal static class MediaAndSearchContractTests
             var media = Directory.CreateDirectory(Path.Combine(root, "media")).FullName;
             var folder = Directory.CreateDirectory(Path.Combine(media, "Movie")).FullName;
             var shared = Directory.CreateDirectory(Path.Combine(root, "shared")).FullName;
-            var item = CreateItem("Movie", Path.Combine(folder, "movie.mkv"));
-            var result = MediaInfoSyncPathResolver.Resolve(item, shared, media + " => ../escape");
+            var result = MediaInfoSyncPathResolver.ResolvePath(folder, "movie", shared, media + " => ../escape");
 
             AssertTrue(result.Success, "Unsafe mapping should be ignored and safe fallback should resolve: " + result.Error);
             AssertFalse(result.MappingMatched, "Unsafe logical root was accepted as a mapping.");
             AssertPathUnder(shared, result.JsonPath, "Fallback JSON path escaped shared root.");
         });
+    }
+
+    private static void MediaInfoSyncBaseItemWrapperFailsSafely()
+    {
+        var item = CreateItem("Transient", Path.Combine(Path.GetTempPath(), "transient.mkv"));
+        MediaInfoSyncPathResolution result = null;
+        Exception escaped = null;
+        try
+        {
+            result = MediaInfoSyncPathResolver.Resolve(item, Path.Combine(Path.GetTempPath(), "shared"), string.Empty);
+        }
+        catch (Exception ex)
+        {
+            escaped = ex;
+        }
+        AssertTrue(escaped == null, "BaseItem wrapper leaked an exception: " + escaped?.Message);
+        AssertTrue(result != null && !result.Success, "Partially initialized BaseItem should fail safely instead of reporting success.");
+        AssertTrue(!string.IsNullOrWhiteSpace(result.Error), "Safe failure should include an error reason.");
     }
 
     private static void FtsDetectsSimpleTokenizer()
