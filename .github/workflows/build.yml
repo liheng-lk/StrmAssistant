@@ -43,6 +43,14 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Run behavioral contract tests
+        shell: pwsh
+        run: |
+          dotnet run --project StrmAssistant.ContractTests/StrmAssistant.ContractTests.csproj `
+            --configuration Release `
+            -p:EmbyServerCoreVersion=${{ matrix.emby_core }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Install ILRepack
         shell: pwsh
         run: dotnet tool install -g dotnet-ilrepack --version 2.0.44
