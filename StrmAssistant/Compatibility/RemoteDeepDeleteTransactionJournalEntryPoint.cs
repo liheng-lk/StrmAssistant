@@ -15,6 +15,7 @@ namespace StrmAssistant.Compatibility
     public sealed class RemoteDeepDeleteTransactionJournalStatus
     {
         public bool ExecuteAsyncPatched { get; set; }
+        public int PatchPriority { get; set; }
         public long VerifiedDeletesRecorded { get; set; }
         public long MissingRetriesRecovered { get; set; }
         public long EntriesInvalidatedBecauseTargetExists { get; set; }
@@ -47,6 +48,11 @@ namespace StrmAssistant.Compatibility
     /// and then verified that the object became missing. When TreatNotFoundAsSuccess is disabled, a later
     /// retry may accept Missing only if this exact provider/path/source identity has such a recent proof.
     /// No credentials, tokens, passwords or query strings are stored.
+    ///
+    /// This patch intentionally runs at Priority.Last. Prefixes therefore run after the OpenList sidecar
+    /// preflight, while postfixes run before the sidecar completion wrapper. That means the journal records
+    /// the main-file verified-delete stage even when sidecar cleanup later fails, and a retry can resume the
+    /// missing main file while still allowing the frozen sidecar transaction to complete.
     /// </summary>
     public sealed class RemoteDeepDeleteTransactionJournalEntryPoint : IServerEntryPoint
     {
@@ -57,7 +63,8 @@ namespace StrmAssistant.Compatibility
         {
             var status = new RemoteDeepDeleteTransactionJournalStatus
             {
-                JournalPath = RemoteDeepDeleteTransactionJournalStore.Path
+                JournalPath = RemoteDeepDeleteTransactionJournalStore.Path,
+                PatchPriority = Priority.Last
             };
             RemoteDeepDeleteTransactionJournalState.Status = status;
             try
@@ -71,14 +78,17 @@ namespace StrmAssistant.Compatibility
                     return;
                 }
 
+                var prefix = new HarmonyMethod(typeof(RemoteDeepDeleteTransactionJournalPatches).GetMethod(
+                    nameof(RemoteDeepDeleteTransactionJournalPatches.Prefix),
+                    BindingFlags.Public | BindingFlags.Static))
+                { priority = Priority.Last };
+                var postfix = new HarmonyMethod(typeof(RemoteDeepDeleteTransactionJournalPatches).GetMethod(
+                    nameof(RemoteDeepDeleteTransactionJournalPatches.Postfix),
+                    BindingFlags.Public | BindingFlags.Static))
+                { priority = Priority.Last };
+
                 _harmony = new Harmony(HarmonyId);
-                _harmony.Patch(execute,
-                    prefix: new HarmonyMethod(typeof(RemoteDeepDeleteTransactionJournalPatches).GetMethod(
-                        nameof(RemoteDeepDeleteTransactionJournalPatches.Prefix),
-                        BindingFlags.Public | BindingFlags.Static)),
-                    postfix: new HarmonyMethod(typeof(RemoteDeepDeleteTransactionJournalPatches).GetMethod(
-                        nameof(RemoteDeepDeleteTransactionJournalPatches.Postfix),
-                        BindingFlags.Public | BindingFlags.Static)));
+                _harmony.Patch(execute, prefix: prefix, postfix: postfix);
                 status.ExecuteAsyncPatched = true;
                 RemoteDeepDeleteTransactionJournalStore.PruneExpired();
             }
@@ -103,25 +113,17 @@ namespace StrmAssistant.Compatibility
             if (plan == null || !plan.Applicable || !plan.Allowed || string.IsNullOrWhiteSpace(plan.RemotePath))
                 return true;
             var options = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
-            if (options.TreatNotFoundAsSuccess) return true;
-            if (!RemoteDeepDeleteTransactionJournalStore.Contains(plan)) return true;
+            if (options.TreatNotFoundAsSuccess || !RemoteDeepDeleteTransactionJournalStore.Contains(plan))
+                return true;
 
-            __result = ResumeVerifiedTransactionAsync(plan, cancellationToken);
-            return false;
-        }
-
-        public static void Postfix(RemoteDeepDeletePlan plan, ref Task<RemoteDeepDeleteExecutionResult> __result)
-        {
-            if (plan == null || __result == null) return;
-            __result = RecordVerifiedDeleteAsync(plan, __result);
-        }
-
-        private static async Task<RemoteDeepDeleteExecutionResult> ResumeVerifiedTransactionAsync(
-            RemoteDeepDeletePlan plan, CancellationToken cancellationToken)
-        {
             try
             {
-                var probe = await new RemoteDeepDeleteService().ProbeAsync(plan, cancellationToken).ConfigureAwait(false);
+                // A bounded synchronous verification in the destructive Prefix is intentional. If the
+                // previous journal became stale because the same remote path was recreated, returning true
+                // continues the current invocation exactly once through the normal delete pipeline instead
+                // of recursively entering ExecuteAsync and duplicating sidecar Harmony state.
+                var probe = new RemoteDeepDeleteService().ProbeAsync(plan, cancellationToken)
+                    .GetAwaiter().GetResult();
                 if (probe.Success && probe.Missing)
                 {
                     Increment(status =>
@@ -130,7 +132,7 @@ namespace StrmAssistant.Compatibility
                         status.LastRemotePath = plan.RemotePath;
                         status.LastError = null;
                     });
-                    return new RemoteDeepDeleteExecutionResult
+                    __result = Task.FromResult(new RemoteDeepDeleteExecutionResult
                     {
                         Success = true,
                         DeleteAccepted = false,
@@ -141,7 +143,8 @@ namespace StrmAssistant.Compatibility
                         VerificationStatusCode = probe.HttpStatusCode,
                         Provider = plan.Provider,
                         RemotePath = plan.RemotePath
-                    };
+                    });
+                    return false;
                 }
 
                 if (probe.Success && probe.Exists)
@@ -151,11 +154,9 @@ namespace StrmAssistant.Compatibility
                     {
                         status.EntriesInvalidatedBecauseTargetExists++;
                         status.LastRemotePath = plan.RemotePath;
+                        status.LastError = null;
                     });
-                    // The path has been recreated or the previous journal is stale. Fall back to the
-                    // normal destructive pipeline, which will perform its own pre-probe and verification.
-                    return await new RemoteDeepDeleteService().ExecuteAsync(plan, cancellationToken)
-                        .ConfigureAwait(false);
+                    return true;
                 }
 
                 Increment(status =>
@@ -164,7 +165,7 @@ namespace StrmAssistant.Compatibility
                     status.LastRemotePath = plan.RemotePath;
                     status.LastError = probe.Error ?? "Journal retry probe was ambiguous.";
                 });
-                return new RemoteDeepDeleteExecutionResult
+                __result = Task.FromResult(new RemoteDeepDeleteExecutionResult
                 {
                     Success = false,
                     Provider = plan.Provider,
@@ -173,7 +174,8 @@ namespace StrmAssistant.Compatibility
                     PreProbeError = probe.Error,
                     Error = "A prior verified-delete journal exists, but the current remote state could not be safely verified: " +
                             (probe.Error ?? "ambiguous probe result")
-                };
+                });
+                return false;
             }
             catch (Exception ex)
             {
@@ -183,14 +185,21 @@ namespace StrmAssistant.Compatibility
                     status.LastRemotePath = plan.RemotePath;
                     status.LastError = ex.GetBaseException().Message;
                 });
-                return new RemoteDeepDeleteExecutionResult
+                __result = Task.FromResult(new RemoteDeepDeleteExecutionResult
                 {
                     Success = false,
                     Provider = plan.Provider,
                     RemotePath = plan.RemotePath,
                     Error = "Verified-delete journal retry failed: " + ex.GetBaseException().Message
-                };
+                });
+                return false;
             }
+        }
+
+        public static void Postfix(RemoteDeepDeletePlan plan, ref Task<RemoteDeepDeleteExecutionResult> __result)
+        {
+            if (plan == null || __result == null) return;
+            __result = RecordVerifiedDeleteAsync(plan, __result);
         }
 
         private static async Task<RemoteDeepDeleteExecutionResult> RecordVerifiedDeleteAsync(RemoteDeepDeletePlan plan,
