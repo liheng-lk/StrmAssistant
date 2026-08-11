@@ -67,9 +67,6 @@ namespace StrmAssistant.Experience
             AllowAutoRedirect = false
         });
 
-        // Contract tests replace only the final transport boundary. Production never assigns this.
-        // Request construction, auth headers, bodies, state transitions and response parsing remain
-        // the exact production code paths under test.
         internal static Func<HttpRequestMessage, HttpCompletionOption, CancellationToken,
             Task<HttpResponseMessage>> SendAsyncOverride { get; set; }
 
@@ -100,7 +97,7 @@ namespace StrmAssistant.Experience
             plan.TargetLooksRemote = IsHttpTarget(target);
             var mappings = RemoteDeepDeleteRuntimeSettings.ParseMappings(options.PathMappings);
             var targetWithoutQuery = StripQueryAndFragment(target);
-            RemotePathMapping mapping = null;
+            RemoteDeepDeletePathMapping mapping = null;
             string suffix = null;
             foreach (var candidate in mappings)
             {
@@ -365,7 +362,6 @@ namespace StrmAssistant.Experience
                 var http = (int)response.StatusCode;
                 var apiCode = TryReadApiCode(text);
 
-                // Core fail-closed semantics. Do not depend on the optional Harmony normalization layer.
                 if (http == 401 || http == 403 || apiCode == 401 || apiCode == 403)
                     return ProbeFail(plan, "OpenList authorization failed; missing state was not accepted.", http, apiCode);
 
