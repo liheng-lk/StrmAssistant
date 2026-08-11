@@ -63,9 +63,11 @@ namespace StrmAssistant.Common
 
         public void DeepDeleteSendNotification(BaseItem item, User user, HashSet<string> mountPaths)
         {
-            var options = ExperienceOptions;
-            if (!options.EnableNotificationEnhance || !options.NotifyDeepDelete) return;
-
+            // deep.delete is a stable automation event used by Emby notification/webhook providers.
+            // It intentionally does NOT depend on EnableNotificationEnhance/NotifyDeepDelete: those
+            // options control additional human-facing enhancement notifications, while deep.delete
+            // is part of the explicit Deep Delete operation contract and may drive external storage
+            // automation for arbitrary STRM providers.
             Resources.Culture = Thread.CurrentThread.CurrentUICulture;
 
             var mountPathList = string.Join(Environment.NewLine, mountPaths ?? new HashSet<string>());
