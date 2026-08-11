@@ -1,6 +1,7 @@
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Entities;
+using StrmAssistant.MediaEnhance;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -18,6 +19,10 @@ namespace StrmAssistant.Experience
         public bool RequiresRemoteDelete { get; set; }
         public bool Allowed { get; set; }
         public RemoteDeepDeletePlan RemotePlan { get; set; }
+        public bool RequiresLocalDeepDelete { get; set; }
+        public bool LocalDeepDeleteAllowed { get; set; }
+        public bool LocalTargetResolutionFailed { get; set; }
+        public DeepDeletePlan LocalPlan { get; set; }
         public string Error { get; set; }
     }
 
@@ -31,6 +36,9 @@ namespace StrmAssistant.Experience
         public int RemoteCandidateCount { get; set; }
         public int UniqueRemotePathCount { get; set; }
         public int LocalOnlyCount { get; set; }
+        public int LocalDeepDeleteItemCount { get; set; }
+        public int LocalDeepDeleteEntryCount { get; set; }
+        public int BlockedLocalEntryCount { get; set; }
         public int BlockedRemoteCount { get; set; }
         public int MaxRemoteCandidates { get; set; }
         public bool CandidateLimitExceeded { get; set; }
@@ -42,14 +50,16 @@ namespace StrmAssistant.Experience
 
     /// <summary>
     /// Expands one or more Emby delete roots into media leaves before a destructive native delete is
-    /// allowed to continue. Container descendant enumeration is fail-closed: an error can never be
-    /// interpreted as an empty folder during a destructive operation.
+    /// allowed to continue. Container descendant enumeration is fail-closed. For non-remote STRM leaves,
+    /// the same local DeepDeleteTargetFile/AssociatedFiles rules are planned too, so a mixed parent tree
+    /// cannot silently deep-delete its cloud targets while orphaning configured local targets.
     /// </summary>
     public sealed class RemoteDeepDeleteCascadeService
     {
         public const int DefaultMaxRemoteCandidates = 512;
         private readonly ILibraryManager _libraryManager;
         private readonly RemoteDeepDeleteService _remoteService = new RemoteDeepDeleteService();
+        private readonly DeepDeleteService _localService = new DeepDeleteService();
 
         public RemoteDeepDeleteCascadeService(ILibraryManager libraryManager)
         {
@@ -64,9 +74,15 @@ namespace StrmAssistant.Experience
                 MaxRemoteCandidates = Math.Max(1, maxRemoteCandidates)
             };
             var runtime = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
+            var experience = Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions;
             if (!runtime.Enabled || runtime.Provider == RemoteDeepDeleteProviderType.None)
             {
                 result.Error = "Remote Deep Delete is disabled or no remote provider is selected.";
+                return result;
+            }
+            if (experience?.EnableDeepDelete != true)
+            {
+                result.Error = "Deep Delete is disabled in plugin options.";
                 return result;
             }
 
@@ -94,8 +110,6 @@ namespace StrmAssistant.Experience
                     var error = enumerationError ??
                                 "Unknown descendant enumeration failure for root " + root.InternalId + ".";
                     result.EnumerationErrors.Add(error);
-                    // Synthetic unknown-descendant entry makes every native guard fail closed even when
-                    // no real leaf could be enumerated. It is never executable as a remote delete plan.
                     result.Entries.Add(new RemoteDeepDeleteCascadeEntry
                     {
                         ItemId = "enumeration:" + root.InternalId,
@@ -106,6 +120,7 @@ namespace StrmAssistant.Experience
                         LooksRemote = true,
                         RequiresRemoteDelete = false,
                         Allowed = false,
+                        LocalDeepDeleteAllowed = false,
                         Error = error
                     });
                     continue;
@@ -135,7 +150,8 @@ namespace StrmAssistant.Experience
                     LooksRemote = looksRemote,
                     RequiresRemoteDelete = remotePlan?.Applicable == true,
                     Allowed = remotePlan?.Applicable == true && remotePlan.Allowed,
-                    RemotePlan = remotePlan
+                    RemotePlan = remotePlan,
+                    LocalDeepDeleteAllowed = true
                 };
 
                 if (remotePlan?.Applicable == true)
@@ -155,6 +171,7 @@ namespace StrmAssistant.Experience
                 else
                 {
                     result.LocalOnlyCount++;
+                    AttachLocalPlan(item, experience, entry, result);
                 }
                 result.Entries.Add(entry);
             }
@@ -164,7 +181,8 @@ namespace StrmAssistant.Experience
                 .Select(entry => entry.RemotePlan.RemotePath)
                 .Distinct(StringComparer.Ordinal)
                 .Count();
-            result.Applicable = result.EnumerationFailed || result.RemoteCandidateCount > 0 || result.BlockedRemoteCount > 0;
+            result.Applicable = result.EnumerationFailed || result.RemoteCandidateCount > 0 ||
+                                result.BlockedRemoteCount > 0 || result.LocalDeepDeleteItemCount > 0;
             result.CandidateLimitExceeded = result.RemoteCandidateCount > result.MaxRemoteCandidates;
 
             if (result.EnumerationFailed)
@@ -180,12 +198,19 @@ namespace StrmAssistant.Experience
             else if (result.BlockedRemoteCount > 0)
             {
                 result.Error = result.BlockedRemoteCount +
-                               " remote-looking media items failed mapping/allow-list preflight. No native local deletion should continue.";
+                               " remote-looking media items failed mapping/allow-list preflight. No local deletion should continue.";
+            }
+            else if (result.BlockedLocalEntryCount > 0)
+            {
+                result.Error = result.BlockedLocalEntryCount +
+                               " local deep-delete target/associated path(s) are unresolved or outside configured local allowed roots. No cascade deletion should continue.";
             }
 
             result.Allowed = result.Applicable && !result.EnumerationFailed && !result.CandidateLimitExceeded &&
-                             result.BlockedRemoteCount == 0 &&
-                             result.Entries.Where(entry => entry.RequiresRemoteDelete).All(entry => entry.Allowed);
+                             result.BlockedRemoteCount == 0 && result.BlockedLocalEntryCount == 0 &&
+                             result.Entries.Where(entry => entry.RequiresRemoteDelete).All(entry => entry.Allowed) &&
+                             result.Entries.Where(entry => entry.RequiresLocalDeepDelete)
+                                 .All(entry => entry.LocalDeepDeleteAllowed);
 
             var duplicateRemotePaths = result.Entries
                 .Where(entry => entry.RequiresRemoteDelete && entry.RemotePlan?.RemotePath != null)
@@ -198,7 +223,45 @@ namespace StrmAssistant.Experience
 
             if (!result.EnumerationFailed && result.RemoteCandidateCount == 0 && result.BlockedRemoteCount == 0)
                 result.Warnings.Add("No remote STRM targets were found under the requested delete roots.");
+            if (result.LocalDeepDeleteItemCount > 0)
+                result.Warnings.Add(result.LocalDeepDeleteItemCount +
+                                    " non-remote STRM/symlink item(s) also have configured local deep-delete work and are included in this cascade transaction.");
             return result;
+        }
+
+        private void AttachLocalPlan(BaseItem item, StrmAssistant.Options.ExperienceEnhanceOptions options,
+            RemoteDeepDeleteCascadeEntry entry, RemoteDeepDeleteCascadePlan aggregate)
+        {
+            if (item == null || options == null || string.IsNullOrWhiteSpace(item.Path)) return;
+            var candidate = item.IsShortcut ||
+                            string.Equals(System.IO.Path.GetExtension(item.Path), ".strm",
+                                StringComparison.OrdinalIgnoreCase);
+            if (!candidate) return;
+
+            var localPlan = _localService.BuildPlan(item.Path, options);
+            entry.LocalPlan = localPlan;
+            var configuredLocalWork = options.DeepDeleteTargetFile || options.DeepDeleteAssociatedFiles;
+            if (!configuredLocalWork) return;
+
+            if (options.DeepDeleteTargetFile && !localPlan.HasResolvedMediaTarget)
+            {
+                entry.RequiresLocalDeepDelete = true;
+                entry.LocalDeepDeleteAllowed = false;
+                entry.LocalTargetResolutionFailed = true;
+                entry.Error = "A configured local STRM target could not be resolved for deep deletion.";
+                aggregate.BlockedLocalEntryCount++;
+                aggregate.LocalDeepDeleteItemCount++;
+                return;
+            }
+
+            if (localPlan.Entries.Count == 0) return;
+            entry.RequiresLocalDeepDelete = true;
+            entry.LocalDeepDeleteAllowed = !localPlan.HasBlockedEntries;
+            aggregate.LocalDeepDeleteItemCount++;
+            aggregate.LocalDeepDeleteEntryCount += localPlan.Entries.Count;
+            aggregate.BlockedLocalEntryCount += localPlan.Entries.Count(planEntry => !planEntry.Allowed);
+            if (!entry.LocalDeepDeleteAllowed && string.IsNullOrWhiteSpace(entry.Error))
+                entry.Error = "One or more local deep-delete paths are outside configured allowed roots.";
         }
 
         private bool TryFetchMediaDescendants(BaseItem root, out BaseItem[] descendants, out string error)
