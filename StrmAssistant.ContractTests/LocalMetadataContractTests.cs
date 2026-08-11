@@ -169,7 +169,7 @@ internal static class LocalMetadataContractTests
                 var path = Convert.ToString(args[0]);
                 var type = targetMethod.GetGenericArguments()[0];
                 var json = File.ReadAllText(path);
-                return JsonSerializer.Deserialize(json, type, new JsonSerializerOptions
+                return System.Text.Json.JsonSerializer.Deserialize(json, type, new System.Text.Json.JsonSerializerOptions
                 {
                     PropertyNameCaseInsensitive = true
                 });
