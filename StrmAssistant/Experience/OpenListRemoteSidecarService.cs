@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
@@ -12,24 +13,42 @@ using System.Threading.Tasks;
 
 namespace StrmAssistant.Experience
 {
+    [DataContract]
     internal sealed class OpenListListResponse
     {
+        [DataMember(Name = "code")]
         public int code { get; set; }
+
+        [DataMember(Name = "message")]
         public string message { get; set; }
+
+        [DataMember(Name = "data")]
         public OpenListListData data { get; set; }
     }
 
+    [DataContract]
     internal sealed class OpenListListData
     {
+        [DataMember(Name = "content")]
         public List<OpenListListEntry> content { get; set; }
+
+        [DataMember(Name = "total")]
         public long total { get; set; }
     }
 
+    [DataContract]
     internal sealed class OpenListListEntry
     {
+        [DataMember(Name = "name")]
         public string name { get; set; }
+
+        [DataMember(Name = "is_dir")]
         public bool is_dir { get; set; }
+
+        [DataMember(Name = "size")]
         public long size { get; set; }
+
+        [DataMember(Name = "type")]
         public int type { get; set; }
     }
 
