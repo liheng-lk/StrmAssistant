@@ -114,7 +114,7 @@ internal static class DeepDeleteNotificationDispatchContractTests
         return value.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public)?.GetValue(value);
     }
 
-    private sealed class NotificationManagerProxy : DispatchProxy
+    private class NotificationManagerProxy : DispatchProxy
     {
         public int SendCount { get; private set; }
         public object LastRequest { get; private set; }
