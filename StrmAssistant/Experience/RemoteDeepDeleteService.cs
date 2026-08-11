@@ -67,6 +67,12 @@ namespace StrmAssistant.Experience
             AllowAutoRedirect = false
         });
 
+        // Contract tests replace only the final transport boundary. Production never assigns this.
+        // Request construction, auth headers, bodies, state transitions and response parsing remain
+        // the exact production code paths under test.
+        internal static Func<HttpRequestMessage, HttpCompletionOption, CancellationToken,
+            Task<HttpResponseMessage>> SendAsyncOverride { get; set; }
+
         public RemoteDeepDeletePlan BuildPlan(BaseItem item)
         {
             var options = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
@@ -94,8 +100,16 @@ namespace StrmAssistant.Experience
             plan.TargetLooksRemote = IsHttpTarget(target);
             var mappings = RemoteDeepDeleteRuntimeSettings.ParseMappings(options.PathMappings);
             var targetWithoutQuery = StripQueryAndFragment(target);
-            var mapping = mappings.FirstOrDefault(candidate =>
-                targetWithoutQuery.StartsWith(candidate.SourcePrefix, StringComparison.OrdinalIgnoreCase));
+            RemotePathMapping mapping = null;
+            string suffix = null;
+            foreach (var candidate in mappings)
+            {
+                if (!TryMatchHttpMapping(targetWithoutQuery, candidate.SourcePrefix, out var candidateSuffix))
+                    continue;
+                mapping = candidate;
+                suffix = candidateSuffix;
+                break;
+            }
 
             if (mapping == null)
             {
@@ -107,11 +121,8 @@ namespace StrmAssistant.Experience
             }
 
             plan.Applicable = true;
-            var suffix = targetWithoutQuery.Substring(mapping.SourcePrefix.Length).TrimStart('/', '\\');
-            try { suffix = Uri.UnescapeDataString(suffix); } catch { }
-
             var remotePath = RemoteDeepDeleteRuntimeSettings.NormalizeRemotePath(
-                mapping.RemoteRoot.TrimEnd('/') + "/" + suffix.Replace('\\', '/'));
+                mapping.RemoteRoot.TrimEnd('/') + "/" + (suffix ?? string.Empty).Replace('\\', '/'));
             if (remotePath == null || remotePath == "/")
             {
                 plan.Error = "The mapping resolved to an invalid/root remote path.";
@@ -177,8 +188,6 @@ namespace StrmAssistant.Experience
             if (plan == null || !plan.Applicable || !plan.Allowed)
                 return Fail(plan, "Remote deletion plan is not allowed.");
 
-            // Never send a destructive request to a target that we cannot first read/verify through
-            // the same configured provider. This separates mapping/auth failures from delete failures.
             var preProbe = await ProbeAsync(plan, cancellationToken).ConfigureAwait(false);
             if (!preProbe.Success)
             {
@@ -268,19 +277,23 @@ namespace StrmAssistant.Experience
 
             try
             {
-                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseContentRead,
+                using var response = await SendAsync(request, HttpCompletionOption.ResponseContentRead,
                     cancellationToken).ConfigureAwait(false);
                 var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var http = (int)response.StatusCode;
                 var apiCode = TryReadApiCode(text);
-                var missing = options.TreatNotFoundAsSuccess &&
-                              (response.StatusCode == HttpStatusCode.NotFound || LooksMissing(text));
-                var accepted = (http >= 200 && http < 300 && (!apiCode.HasValue || apiCode.Value == 200)) || missing;
+                var transportSuccess = http >= 200 && http < 300;
+                var apiSuccess = !apiCode.HasValue || apiCode.Value == 200;
+                var explicitMissing = options.TreatNotFoundAsSuccess &&
+                                      (response.StatusCode == HttpStatusCode.NotFound ||
+                                       response.StatusCode == HttpStatusCode.Gone ||
+                                       (transportSuccess && apiCode.HasValue && apiCode.Value != 200 && LooksMissing(text)));
+                var accepted = transportSuccess && apiSuccess || explicitMissing;
                 return new RemoteDeepDeleteExecutionResult
                 {
                     Success = false,
                     DeleteAccepted = accepted,
-                    AlreadyMissing = missing,
+                    AlreadyMissing = explicitMissing,
                     HttpStatusCode = http,
                     Provider = RemoteDeepDeleteProviderType.OpenList.ToString(),
                     RemotePath = plan.RemotePath,
@@ -307,7 +320,7 @@ namespace StrmAssistant.Experience
 
             try
             {
-                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseContentRead,
+                using var response = await SendAsync(request, HttpCompletionOption.ResponseContentRead,
                     cancellationToken).ConfigureAwait(false);
                 var http = (int)response.StatusCode;
                 var missing = options.TreatNotFoundAsSuccess &&
@@ -346,23 +359,18 @@ namespace StrmAssistant.Experience
             request.Content = new StringContent(body, Encoding.UTF8, "application/json");
             try
             {
-                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseContentRead,
+                using var response = await SendAsync(request, HttpCompletionOption.ResponseContentRead,
                     cancellationToken).ConfigureAwait(false);
                 var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var http = (int)response.StatusCode;
                 var apiCode = TryReadApiCode(text);
-                var missing = response.StatusCode == HttpStatusCode.NotFound ||
-                              response.StatusCode == HttpStatusCode.Gone || LooksMissing(text);
-                if (missing)
-                {
-                    return new RemoteDeepDeleteProbeResult
-                    {
-                        Success = true, Missing = true, Exists = false, HttpStatusCode = http,
-                        ApiCode = apiCode, Provider = RemoteDeepDeleteProviderType.OpenList.ToString(),
-                        RemotePath = plan.RemotePath
-                    };
-                }
-                if (http >= 200 && http < 300 && (!apiCode.HasValue || apiCode.Value == 200))
+
+                // Core fail-closed semantics. Do not depend on the optional Harmony normalization layer.
+                if (http == 401 || http == 403 || apiCode == 401 || apiCode == 403)
+                    return ProbeFail(plan, "OpenList authorization failed; missing state was not accepted.", http, apiCode);
+
+                var transportSuccess = http >= 200 && http < 300;
+                if (transportSuccess && (!apiCode.HasValue || apiCode.Value == 200))
                 {
                     return new RemoteDeepDeleteProbeResult
                     {
@@ -371,6 +379,18 @@ namespace StrmAssistant.Experience
                         RemotePath = plan.RemotePath
                     };
                 }
+
+                if (response.StatusCode == HttpStatusCode.NotFound || response.StatusCode == HttpStatusCode.Gone ||
+                    (transportSuccess && apiCode.HasValue && apiCode.Value != 200 && LooksMissing(text)))
+                {
+                    return new RemoteDeepDeleteProbeResult
+                    {
+                        Success = true, Missing = true, Exists = false, HttpStatusCode = http,
+                        ApiCode = apiCode, Provider = RemoteDeepDeleteProviderType.OpenList.ToString(),
+                        RemotePath = plan.RemotePath
+                    };
+                }
+
                 return ProbeFail(plan, "OpenList /api/fs/get returned HTTP " + http +
                                        (apiCode.HasValue ? ", API code " + apiCode.Value : string.Empty) +
                                        TruncateBody(text), http, apiCode);
@@ -410,7 +430,7 @@ namespace StrmAssistant.Experience
             if (depthZero) request.Headers.TryAddWithoutValidation("Depth", "0");
             try
             {
-                using var response = await Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead,
+                using var response = await SendAsync(request, HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
                 var http = (int)response.StatusCode;
                 if (response.StatusCode == HttpStatusCode.NotFound || response.StatusCode == HttpStatusCode.Gone)
@@ -453,6 +473,15 @@ namespace StrmAssistant.Experience
             }
         }
 
+        private static Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            HttpCompletionOption completionOption, CancellationToken cancellationToken)
+        {
+            var sendOverride = SendAsyncOverride;
+            return sendOverride != null
+                ? sendOverride(request, completionOption, cancellationToken)
+                : Client.SendAsync(request, completionOption, cancellationToken);
+        }
+
         private static void AddOpenListAuthorization(HttpRequestMessage request, string token)
         {
             if (string.IsNullOrWhiteSpace(token)) return;
@@ -465,6 +494,47 @@ namespace StrmAssistant.Experience
             var auth = Convert.ToBase64String(Encoding.UTF8.GetBytes(
                 (options.Username ?? string.Empty) + ":" + (options.Password ?? string.Empty)));
             request.Headers.Authorization = new AuthenticationHeaderValue("Basic", auth);
+        }
+
+        private static bool TryMatchHttpMapping(string target, string sourcePrefix, out string suffix)
+        {
+            suffix = null;
+            if (!Uri.TryCreate(target, UriKind.Absolute, out var targetUri) ||
+                !Uri.TryCreate(sourcePrefix, UriKind.Absolute, out var prefixUri))
+                return false;
+            if (!IsHttp(targetUri) || !IsHttp(prefixUri)) return false;
+            if (!string.Equals(targetUri.Scheme, prefixUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(targetUri.Host, prefixUri.Host, StringComparison.OrdinalIgnoreCase) ||
+                EffectivePort(targetUri) != EffectivePort(prefixUri))
+                return false;
+
+            var targetPath = DecodePath(targetUri.AbsolutePath);
+            var prefixPath = DecodePath(prefixUri.AbsolutePath).TrimEnd('/');
+            if (string.Equals(targetPath, prefixPath, StringComparison.Ordinal))
+            {
+                suffix = string.Empty;
+                return true;
+            }
+            if (!targetPath.StartsWith(prefixPath + "/", StringComparison.Ordinal)) return false;
+            suffix = targetPath.Substring(prefixPath.Length).TrimStart('/');
+            return true;
+        }
+
+        private static bool IsHttp(Uri uri)
+        {
+            return uri != null && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+        }
+
+        private static int EffectivePort(Uri uri)
+        {
+            if (!uri.IsDefaultPort) return uri.Port;
+            return uri.Scheme == Uri.UriSchemeHttps ? 443 : 80;
+        }
+
+        private static string DecodePath(string value)
+        {
+            try { return Uri.UnescapeDataString(value ?? string.Empty); }
+            catch { return value ?? string.Empty; }
         }
 
         private static string ResolveTarget(BaseItem item)
@@ -515,8 +585,7 @@ namespace StrmAssistant.Experience
 
         private static bool IsHttpTarget(string value)
         {
-            return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
-                   (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri) && IsHttp(uri);
         }
 
         private static string StripQueryAndFragment(string value)
@@ -530,7 +599,7 @@ namespace StrmAssistant.Experience
         {
             if (string.IsNullOrWhiteSpace(value)) return value;
             if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return value;
-            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return value;
+            if (!IsHttp(uri)) return value;
             return uri.GetLeftPart(UriPartial.Path);
         }
 
