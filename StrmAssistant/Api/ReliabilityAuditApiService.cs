@@ -40,6 +40,7 @@ namespace StrmAssistant.Api
         public MediaInfoReliabilityShadowRuntimeStatus MediaInfoShadowCaptureHook { get; set; }
         public MediaInfoReliabilityShadowUpdateStatus MediaInfoShadowUpdateHook { get; set; }
         public MediaInfoReliabilitySeedMigrationStatus MediaInfoShadowMigration { get; set; }
+        public MediaInfoIntegrityRecoveryQueueStatus MediaInfoRecoveryQueue { get; set; }
         public ExplicitMediaInfoClearReliabilityStatus ExplicitMediaInfoClearInvalidation { get; set; }
         public RemoteDeepDeleteCapabilityStatus RemoteDeepDelete { get; set; }
         public RemoteDeepDeleteProbeSafetyStatus RemoteProbeSafety { get; set; }
@@ -95,6 +96,7 @@ namespace StrmAssistant.Api
                 MediaInfoShadowCaptureHook = MediaInfoReliabilityShadowRuntimeState.Status,
                 MediaInfoShadowUpdateHook = MediaInfoReliabilityShadowUpdateState.Status,
                 MediaInfoShadowMigration = MediaInfoReliabilitySeedMigrationState.Status,
+                MediaInfoRecoveryQueue = MediaInfoIntegrityRecoveryQueueState.Status,
                 ExplicitMediaInfoClearInvalidation = ExplicitMediaInfoClearReliabilityState.Status,
                 RemoteDeepDelete = RemoteDeepDeleteModState.Status,
                 RemoteProbeSafety = RemoteDeepDeleteProbeSafetyState.Status,
@@ -133,6 +135,14 @@ namespace StrmAssistant.Api
                 result.Warnings.Add("No SaveMediaStreams STRM shadow capture hook is active.");
             if (result.MediaInfoShadowUpdateHook?.UpdateItemsTargetsPatched <= 0)
                 result.Warnings.Add("No UpdateItems STRM shadow completion hook is active.");
+            if (result.MediaInfoRecoveryQueue?.Started != true)
+                result.Warnings.Add("The bounded MediaInfo recovery queue is not running.");
+            if (result.MediaInfoRecoveryQueue?.DroppedBecauseFull > 0)
+                result.Warnings.Add(result.MediaInfoRecoveryQueue.DroppedBecauseFull +
+                                    " MediaInfo recovery events were dropped after the bounded queue reached capacity; use the explicit STRM repair task for fleet cleanup.");
+            if (result.MediaInfoRecoveryQueue?.Exhausted > 0)
+                result.Warnings.Add(result.MediaInfoRecoveryQueue.Exhausted +
+                                    " queued MediaInfo recoveries exhausted automatic local retries and may require the explicit repair task.");
             if (result.MediaInfoShadowMigration?.ManualSeedRequired == true)
                 result.Warnings.Add("STRM shadow schema-v" + result.MediaInfoShadowMigration.SchemaVersion +
                                     " seed is pending. Run the manual reliability seed task when the library scanner is idle.");
@@ -187,7 +197,7 @@ namespace StrmAssistant.Api
 
             if (result.NativeDeleteTransaction?.LocalDeletesFailedAfterRemoteSuccess > 0 ||
                 result.NativeDeleteTransaction?.LocalItemsStillPresentAfterRemoteSuccess > 0)
-                result.Warnings.Add("A remote-success/local-delete partial state has previously been observed. Inspect NativeDeleteTransaction, DeferredDeleteCleanup and RemoteDeleteJournal; the new transaction layers preserve local MediaInfo and support bounded retry instead of treating the state as irrecoverable.");
+                result.Warnings.Add("A remote-success/local-delete partial state has previously been observed. Inspect NativeDeleteTransaction, DeferredDeleteCleanup and RemoteDeleteJournal; the transaction layers preserve local MediaInfo and support bounded retry instead of treating the state as irrecoverable.");
 
             if (result.Inventory?.Included == true)
             {
@@ -221,6 +231,7 @@ namespace StrmAssistant.Api
                                    result.OpenListSidecars?.ExecuteAsyncPatched == true)));
 
             result.Healthy = result.MediaInfoPreRead?.MediaSourceTargetsPatched > 0 &&
+                             result.MediaInfoRecoveryQueue?.Started == true &&
                              string.IsNullOrWhiteSpace(result.MediaInfoPreRead?.Error) &&
                              string.IsNullOrWhiteSpace(result.MediaInfoPersistence?.Error) &&
                              (result.Inventory?.Included != true || result.Inventory.PlaybackProbeRisk == 0) &&
