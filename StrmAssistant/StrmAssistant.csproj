@@ -65,6 +65,11 @@
       <DependentUpon>Resources.resx</DependentUpon>
     </EmbeddedResource>
   </ItemGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>StrmAssistant.ContractTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
   <Target Name="PackagePlugin" DependsOnTargets="Build">
     <Message Importance="High" Text="Harmony runtime asset: $(HarmonyPath)" />
     <Error Condition="!Exists('$(ILRepackExe)')" Text="ILRepack tool not found at $(ILRepackExe). Install it with: dotnet tool install -g dotnet-ilrepack" />
