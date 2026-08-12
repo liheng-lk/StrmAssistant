@@ -59,6 +59,8 @@ namespace StrmAssistant.UI
 
         public IReadOnlyList<IPluginUIPageController> TabPageControllers => _tabs.AsReadOnly();
 
+        public string DefaultTabDisplayName => "常规";
+
         public int VisibleTabCount => 1 + _tabs.Count;
 
         public override Task<IPluginUIView> CreateDefaultPageView()
