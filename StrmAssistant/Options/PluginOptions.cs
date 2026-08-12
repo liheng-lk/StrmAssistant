@@ -66,13 +66,6 @@ namespace StrmAssistant.Options
             }
 
             var experience = ExperienceEnhanceOptions;
-            if (experience != null)
-            {
-                // Once the current settings generation is saved, even an all-default/empty remote-delete
-                // configuration is an explicit user choice and must never fall back to a legacy file.
-                experience.RemoteDeepDeleteUiAuthoritative = true;
-            }
-
             if (experience?.EnableRemoteDeepDelete == true)
             {
                 if (!experience.EnableDeepDelete)
@@ -111,6 +104,12 @@ namespace StrmAssistant.Options
 
         protected override void Validate(ValidationContext context)
         {
+            if (ExperienceEnhanceOptions != null)
+            {
+                // The legacy/simple full-form save represents an explicit choice for all remote-delete fields.
+                ExperienceEnhanceOptions.RemoteDeepDeleteUiAuthoritative = true;
+            }
+
             foreach (var error in GetCrossValidationErrors())
                 context.AddValidationError(error);
         }
