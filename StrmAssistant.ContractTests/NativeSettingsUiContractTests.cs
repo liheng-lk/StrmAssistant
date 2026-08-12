@@ -13,9 +13,9 @@ internal static class NativeSettingsUiContractTests
         var tests = new (string Name, Action Body)[]
         {
             ("Native settings controller uses Emby IHasTabbedUIPages", UsesNativeTabbedInterface),
-            ("Native settings exposes exactly six functional tabs", HasSixTabs),
+            ("Native settings exposes one default plus five additional tabs", HasSixVisibleTabs),
             ("Native settings tab labels match requested categories", TabLabelsMatch),
-            ("Native settings page is the main config page", IsMainConfigPage),
+            ("Native tab host is not forced through the single-page main-config route", IsNotMainConfigPage),
             ("Legacy DOM settings tabs module is explicitly retired", LegacyDomModuleRetired),
         };
 
@@ -54,25 +54,30 @@ internal static class NativeSettingsUiContractTests
             "Controller does not implement Emby's native IHasTabbedUIPages contract.");
     }
 
-    private static void HasSixTabs()
+    private static void HasSixVisibleTabs()
     {
         var controller = CreateController();
-        AssertEqual(6, controller.TabPageControllers.Count, "Native settings tab count mismatch.");
+        AssertEqual(5, controller.TabPageControllers.Count,
+            "Emby tab host should receive only five additional page controllers; the default view is the first tab.");
+        AssertEqual(6, controller.VisibleTabCount, "Native settings visible tab count mismatch.");
     }
 
     private static void TabLabelsMatch()
     {
         var controller = CreateController();
+        AssertEqual("常规", controller.DefaultTabDisplayName, "Default tab label changed.");
         var labels = controller.TabPageControllers.Select(page => page.PageInfo.DisplayName).ToArray();
-        var expected = new[] { "常规", "媒体信息", "元数据", "片头片尾", "体验增强", "关于" };
-        AssertEqual(string.Join("|", expected), string.Join("|", labels), "Native tab order/labels changed.");
+        var expected = new[] { "媒体信息", "元数据", "片头片尾", "体验增强", "关于" };
+        AssertEqual(string.Join("|", expected), string.Join("|", labels), "Additional native tab order/labels changed.");
     }
 
-    private static void IsMainConfigPage()
+    private static void IsNotMainConfigPage()
     {
         var controller = CreateController();
-        AssertTrue(controller.PageInfo.IsMainConfigPage, "Native settings controller is not marked as main config page.");
-        AssertTrue(controller.PageInfo.EnableInMainMenu, "Native settings controller is not enabled in plugin UI navigation.");
+        AssertTrue(!controller.PageInfo.IsMainConfigPage,
+            "Tabbed host must not be forced through Emby's single-page main-config route.");
+        AssertTrue(controller.PageInfo.EnableInMainMenu,
+            "Native tabbed settings controller is not enabled in plugin UI navigation.");
     }
 
     private static void LegacyDomModuleRetired()
