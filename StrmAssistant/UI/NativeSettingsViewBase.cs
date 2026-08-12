@@ -41,8 +41,6 @@ namespace StrmAssistant.UI
 
         public string OKButtonCaption { get; set; }
 
-        public DialogAction PrimaryDialogAction { get; set; }
-
         public virtual bool IsCommandAllowed(string commandKey)
         {
             return true;
@@ -74,7 +72,6 @@ namespace StrmAssistant.UI
             QueryCloseAction = QueryCloseAction,
             DialogSize = DialogSize,
             OKButtonCaption = OKButtonCaption,
-            PrimaryDialogAction = PrimaryDialogAction,
             WizardHidingBehavior = WizardHidingBehavior,
         };
     }
