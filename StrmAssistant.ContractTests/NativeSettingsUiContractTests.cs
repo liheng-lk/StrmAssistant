@@ -43,7 +43,9 @@ internal static class NativeSettingsUiContractTests
     private static NativeSettingsMainController CreateController()
     {
         var info = new PluginInfo { Id = "63c322b7-a371-41a3-b11f-04f8418b37d8" };
-        return new NativeSettingsMainController(info, null);
+        // Page factories are intentionally not invoked in this metadata contract. Live page creation/save is
+        // verified in Emby runtime because it requires the real Plugin + IJsonSerializer services.
+        return new NativeSettingsMainController(info, null, null);
     }
 
     private static void UsesNativeTabbedInterface()
