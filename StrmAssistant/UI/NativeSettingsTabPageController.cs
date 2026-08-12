@@ -17,8 +17,6 @@ namespace StrmAssistant.UI
             {
                 Name = name,
                 DisplayName = displayName,
-                EnableInMainMenu = false,
-                IsMainConfigPage = false,
             };
         }
 
