@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Services;
@@ -22,15 +23,43 @@ setTimeout(() => {
 }, 3200);
 ";
 
-        private const string SettingsTabsLoader = @"
-setTimeout(() => {
-    try {
-        require(['components/strmassistant/settings-tabs']).then((responses) => {
-            const module = responses && responses[0];
-            if (module && typeof module.init === 'function') module.init();
-        });
-    } catch (_) {}
-}, 1400);
+        private const string SettingsTabsLoaderTemplate = @"
+(() => {
+    const moduleName = '__MODULE__';
+    const maxAttempts = 40;
+    let attempt = 0;
+
+    const retry = () => {
+        if (attempt >= maxAttempts) return;
+        window.setTimeout(load, 500);
+    };
+
+    const load = () => {
+        attempt += 1;
+        try {
+            const pending = require([moduleName]);
+            if (!pending || typeof pending.then !== 'function') {
+                retry();
+                return;
+            }
+
+            pending.then((responses) => {
+                const module = responses && responses[0];
+                if (module && typeof module.init === 'function') {
+                    module.init();
+                    window.__strmAssistantSettingsTabsModule = moduleName;
+                    window.__strmAssistantSettingsTabsLoaded = true;
+                    return;
+                }
+                retry();
+            }).catch(() => retry());
+        } catch (_) {
+            retry();
+        }
+    };
+
+    window.setTimeout(load, 250);
+})();
 ";
 
         private readonly IHttpResultFactory _resultFactory;
@@ -66,8 +95,25 @@ setTimeout(() => {
 
         public object Get(GetShortcutMenu request)
         {
-            var javascript = ShortcutMenuHelper.ModifiedShortcutsString + SeriesCollectionsLoader + SettingsTabsLoader;
+            var version = Plugin.Instance?.CurrentVersion ?? "0.0.0.0";
+            var javascript = ShortcutMenuHelper.ModifiedShortcutsString
+                             + SeriesCollectionsLoader
+                             + BuildSettingsTabsLoader(version);
             return _resultFactory.GetResult(javascript.AsSpan(), "application/x-javascript");
+        }
+
+        internal static string BuildSettingsTabsModuleName(string version)
+        {
+            var safeVersion = new string((version ?? string.Empty)
+                .Select(ch => char.IsLetterOrDigit(ch) ? ch : '_')
+                .ToArray());
+            if (string.IsNullOrWhiteSpace(safeVersion)) safeVersion = "unknown";
+            return "components/strmassistant/settings-tabs-v" + safeVersion;
+        }
+
+        internal static string BuildSettingsTabsLoader(string version)
+        {
+            return SettingsTabsLoaderTemplate.Replace("__MODULE__", BuildSettingsTabsModuleName(version));
         }
 
         private static byte[] ReadEmbeddedResource(string resourceName)
