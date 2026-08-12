@@ -1,0 +1,148 @@
+name: Publish Release
+
+on:
+  push:
+    branches:
+      - "agent/custom-rebuild"
+    paths:
+      - ".github/release-version.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Read and validate release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content .github/release-version.txt -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Release version is empty." }
+          $project = Get-Content StrmAssistant/StrmAssistant.csproj -Raw
+          if ($project -notmatch "<Version>$([regex]::Escape($version))</Version>") {
+            throw "release-version.txt ($version) does not match StrmAssistant.csproj <Version>."
+          }
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Validate embedded JavaScript
+        shell: pwsh
+        run: |
+          $scripts = Get-ChildItem StrmAssistant/Web/Resources -Filter *.js -File
+          if (-not $scripts) { throw "No embedded JavaScript resources were found." }
+          foreach ($script in $scripts) {
+            Write-Host "Checking $($script.FullName)"
+            node --check $script.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Run behavioral contract tests for supported Emby cores
+        shell: pwsh
+        run: |
+          $cores = @("4.8.0.80", "4.9.1.90", "4.10.0.1-beta")
+          foreach ($core in $cores) {
+            Write-Host "=== Contract tests: Emby Core $core ==="
+            dotnet run --project StrmAssistant.ContractTests/StrmAssistant.ContractTests.csproj `
+              --configuration Release `
+              -p:EmbyServerCoreVersion=$core
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Install ILRepack
+        shell: pwsh
+        run: dotnet tool install -g dotnet-ilrepack --version 2.0.44
+
+      - name: Build release DLLs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $targets = @(
+            @{ Core = "4.8.0.80"; Suffix = "Emby48" },
+            @{ Core = "4.9.1.90"; Suffix = "Emby49" },
+            @{ Core = "4.10.0.1-beta"; Suffix = "Emby410" }
+          )
+
+          foreach ($target in $targets) {
+            $outDir = Join-Path $env:GITHUB_WORKSPACE ("release-build\\" + $target.Suffix)
+            dotnet msbuild StrmAssistant/StrmAssistant.csproj `
+              -restore `
+              -t:PackagePlugin `
+              -p:Configuration=Release `
+              -p:EmbyServerCoreVersion=$($target.Core) `
+              -p:PluginOutputDir="$outDir"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+            $source = Join-Path $outDir "StrmAssistantCustom.dll"
+            if (-not (Test-Path $source)) { throw "Missing packaged DLL for $($target.Core)." }
+            $destination = Join-Path "dist" ("StrmAssistantCustom-$env:RELEASE_VERSION-$($target.Suffix).dll")
+            Copy-Item $source $destination -Force
+          }
+
+          Copy-Item README.md dist/README.md
+          Copy-Item README.en.md dist/README.en.md
+          Copy-Item LICENSE dist/LICENSE
+          Compress-Archive -Path dist/*.dll,dist/README.md,dist/README.en.md,dist/LICENSE `
+            -DestinationPath "dist/StrmAssistantCustom-$env:RELEASE_VERSION-AllBuilds.zip" -Force
+
+          Get-FileHash dist/* -Algorithm SHA256 | Format-Table -AutoSize
+
+      - name: Prepare release notes
+        shell: pwsh
+        run: |
+          @"
+          # StrmAssistant Custom v$env:RELEASE_VERSION
+
+          Community / fork build of `sjtuross/StrmAssistant`, maintained at `liheng-lk/StrmAssistant`.
+
+          ## Highlights
+          - Emby 4.8 / 4.9 / 4.10 compatibility builds.
+          - STRM MediaInfo reliability and runtime diagnostics.
+          - Online IntroDB.app / TheIntroDB.org intro and credits matching.
+          - Provider-agnostic `deep.delete` notification for Emby Webhook automation.
+          - Optional OpenList / WebDAV direct remote deletion with verification.
+          - Behavioral Contract Tests are required before release assets are produced.
+
+          ## Downloads
+          - `StrmAssistantCustom-$env:RELEASE_VERSION-Emby410.dll`: recommended for Emby 4.10.x.
+          - `StrmAssistantCustom-$env:RELEASE_VERSION-Emby49.dll`: Emby 4.9.x compatibility build.
+          - `StrmAssistantCustom-$env:RELEASE_VERSION-Emby48.dll`: Emby 4.8.x compatibility build.
+          - `StrmAssistantCustom-$env:RELEASE_VERSION-AllBuilds.zip`: all builds plus README and GPL-3.0 license.
+
+          ## Important
+          This is a fork/community build, not an official upstream release. CI/Contract PASS does not imply every external Webhook, remote storage provider, or destructive workflow has been runtime-verified in every environment. Back up Emby configuration/database before upgrading and test destructive actions with disposable media first.
+
+          License: GPL-3.0.
+          "@ | Set-Content release-notes.md -Encoding utf8
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $title = "StrmAssistant Custom $tag (Community Build)"
+          $assets = Get-ChildItem dist -File | Where-Object { $_.Extension -in @('.dll', '.zip') } | ForEach-Object { $_.FullName }
+
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title $title --notes-file release-notes.md
+            gh release upload $tag $assets --repo $env:GITHUB_REPOSITORY --clobber
+          }
+          else {
+            gh release create $tag $assets `
+              --repo $env:GITHUB_REPOSITORY `
+              --target $env:GITHUB_SHA `
+              --title $title `
+              --notes-file release-notes.md
+          }
