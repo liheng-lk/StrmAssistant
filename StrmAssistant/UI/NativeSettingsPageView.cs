@@ -1,6 +1,8 @@
 using MediaBrowser.Model.GenericEdit;
 using MediaBrowser.Model.Plugins.UI.Views;
+using StrmAssistant.Options;
 using System;
+using System.Reflection;
 using System.Threading.Tasks;
 
 namespace StrmAssistant.UI
@@ -30,15 +32,57 @@ namespace StrmAssistant.UI
 
         public Task<IPluginUIView> OnSaveCommand(string itemId, string commandId, string data)
         {
-            _plugin.SaveNativeUiSection(_sectionKey, ContentData);
+            var master = _plugin.GetPluginOptions();
+            switch (_sectionKey)
+            {
+                case NativeSettingsSections.General:
+                    master.GeneralOptions = (GeneralOptions)ContentData;
+                    break;
+                case NativeSettingsSections.Media:
+                    master.MediaInfoExtractOptions = (MediaInfoExtractOptions)ContentData;
+                    break;
+                case NativeSettingsSections.Metadata:
+                    master.MetadataEnhanceOptions = (MetadataEnhanceOptions)ContentData;
+                    break;
+                case NativeSettingsSections.Intro:
+                    master.IntroSkipOptions = (IntroSkipOptions)ContentData;
+                    break;
+                case NativeSettingsSections.Experience:
+                    master.ExperienceEnhanceOptions = (ExperienceEnhanceOptions)ContentData;
+                    break;
+                case NativeSettingsSections.About:
+                    master.AboutOptions = (AboutOptions)ContentData;
+                    break;
+                default:
+                    throw new InvalidOperationException("Unknown native settings section: " + _sectionKey);
+            }
+
+            _plugin.SavePluginOptionsSuppress();
             Reload();
             return Task.FromResult<IPluginUIView>(this);
         }
 
         private void Reload()
         {
-            var master = _plugin.GetPreparedPluginOptionsForNativeUi();
+            var master = PrepareMasterOptions();
             ContentData = _selector(master);
+        }
+
+        private PluginOptions PrepareMasterOptions()
+        {
+            var options = _plugin.GetPluginOptions();
+            var method = typeof(Plugin).GetMethod("OnBeforeShowUI", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (method == null) return options;
+
+            try
+            {
+                var prepared = method.Invoke(_plugin, new object[] { options }) as PluginOptions;
+                return prepared ?? options;
+            }
+            catch (TargetInvocationException ex)
+            {
+                throw ex.InnerException ?? ex;
+            }
         }
     }
 }
