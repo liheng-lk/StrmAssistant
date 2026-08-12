@@ -39,8 +39,6 @@ namespace StrmAssistant.UI
 
         public DialogSize DialogSize { get; set; }
 
-        public string OKButtonCaption { get; set; }
-
         public virtual bool IsCommandAllowed(string commandKey)
         {
             return true;
@@ -65,14 +63,8 @@ namespace StrmAssistant.UI
             UIViewInfoChanged?.Invoke(this, new GenericEventArgs<IPluginUIView>(this));
         }
 
-        public virtual PluginViewOptions ViewOptions => new PluginViewOptions
-        {
-            HelpUrl = HelpUrl,
-            CompactViewAppearance = CompactViewAppearance,
-            QueryCloseAction = QueryCloseAction,
-            DialogSize = DialogSize,
-            OKButtonCaption = OKButtonCaption,
-            WizardHidingBehavior = WizardHidingBehavior,
-        };
+        // Keep this deliberately empty. Dialog decoration properties evolved across Emby 4.8/4.9/4.10;
+        // the settings tabs only require the common IPluginUIView/IPluginPageView contract.
+        public virtual PluginViewOptions ViewOptions => new PluginViewOptions();
     }
 }
