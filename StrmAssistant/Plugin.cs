@@ -27,6 +27,7 @@ using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Plugins;
+using MediaBrowser.Model.Plugins.UI;
 using MediaBrowser.Model.Serialization;
 using MediaBrowser.Model.Tasks;
 using StrmAssistant.Common;
@@ -34,6 +35,7 @@ using StrmAssistant.IntroSkip;
 using StrmAssistant.Options;
 using StrmAssistant.Properties;
 using StrmAssistant.ScheduledTask;
+using StrmAssistant.UI;
 using StrmAssistant.Web.Helper;
 using System;
 using System.Collections.Generic;
@@ -50,7 +52,7 @@ using static StrmAssistant.Options.Utility;
 
 namespace StrmAssistant
 {
-    public class Plugin: BasePluginSimpleUI<PluginOptions>, IHasThumbImage
+    public class Plugin: BasePluginSimpleUI<PluginOptions>, IHasThumbImage, IHasUIPages
     {
         public static Plugin Instance { get; private set; }
         public static LibraryApi LibraryApi { get; private set; }
@@ -75,6 +77,8 @@ namespace StrmAssistant
         private readonly IProviderManager _providerManager;
         private readonly IFileSystem _fileSystem;
         private readonly ITaskManager _taskManager;
+        private readonly IJsonSerializer _jsonSerializer;
+        private IReadOnlyCollection<IPluginUIPageController> _uiPageControllers;
 
         private bool _currentSuppressOnOptionsSaved;
         private int _currentMaxConcurrentCount;
@@ -119,6 +123,7 @@ namespace StrmAssistant
             _providerManager = providerManager;
             _fileSystem = fileSystem;
             _taskManager = taskManager;
+            _jsonSerializer = jsonSerializer;
 
             _currentMaxConcurrentCount = GetOptions().GeneralOptions.MaxConcurrentCount;
             _currentPersistMediaInfo = GetOptions().MediaInfoExtractOptions.PersistMediaInfoMode !=
@@ -351,6 +356,31 @@ namespace StrmAssistant
         {
             var type = GetType();
             return type.Assembly.GetManifestResourceStream(type.Namespace + ".Properties.thumb.png");
+        }
+
+        IReadOnlyCollection<IPluginUIPageController> IHasUIPages.UIPageControllers
+        {
+            get
+            {
+                if (_uiPageControllers == null)
+                {
+                    var controller = new NativeSettingsMainController(GetPluginInfo(), this, _jsonSerializer);
+                    _uiPageControllers = new List<IPluginUIPageController> { controller }.AsReadOnly();
+                    NativeSettingsUiState.Status = new NativeSettingsUiStatus
+                    {
+                        RegistrationAttempted = true,
+                        Registered = true,
+                        TabCount = controller.VisibleTabCount,
+                        AdditionalTabCount = controller.TabPageControllers.Count,
+                        LegacyPagesHidden = 0,
+                        LegacyRollbackPerformed = false,
+                        MainPageIsMainConfigPage = controller.PageInfo.IsMainConfigPage,
+                        Error = null,
+                    };
+                }
+
+                return _uiPageControllers;
+            }
         }
 
         public PluginOptions GetPluginOptions()
@@ -761,10 +791,14 @@ namespace StrmAssistant
 
         protected override void OnCreatePageInfo(PluginPageInfo pageInfo)
         {
-            pageInfo.Name = Name;
+            // BasePluginSimpleUI still owns configuration persistence, but the derived plugin re-implements
+            // IHasUIPages and exposes only NativeSettingsMainController to Emby. Keep this generated page
+            // non-navigable as a defensive fallback so it cannot compete with the native tab host.
+            pageInfo.Name = Name + "LegacySimpleUI";
             pageInfo.DisplayName =
                 Resources.ResourceManager.GetString("PluginOptions_EditorTitle_Strm_Assistant", DefaultUICulture);
-            pageInfo.EnableInMainMenu = true;
+            pageInfo.EnableInMainMenu = false;
+            pageInfo.IsMainConfigPage = false;
             pageInfo.MenuIcon = "video_settings";
 
             base.OnCreatePageInfo(pageInfo);
