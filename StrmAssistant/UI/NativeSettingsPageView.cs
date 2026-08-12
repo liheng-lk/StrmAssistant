@@ -2,6 +2,7 @@ using MediaBrowser.Model.GenericEdit;
 using MediaBrowser.Model.Plugins.UI.Views;
 using StrmAssistant.Options;
 using System;
+using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 
@@ -56,6 +57,10 @@ namespace StrmAssistant.UI
                 default:
                     throw new InvalidOperationException("Unknown native settings section: " + _sectionKey);
             }
+
+            var validationErrors = master.GetCrossValidationErrors();
+            if (validationErrors.Count > 0)
+                throw new InvalidOperationException(string.Join(Environment.NewLine, validationErrors));
 
             _plugin.SavePluginOptionsSuppress();
             Reload();
