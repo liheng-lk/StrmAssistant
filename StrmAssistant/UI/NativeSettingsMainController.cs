@@ -31,15 +31,18 @@ namespace StrmAssistant.UI
             _jsonSerializer = jsonSerializer;
             PageInfo = new PluginPageInfo
             {
-                Name = "StrmAssistantNativeSettings",
+                Name = "StrmAssistantSettings",
                 EnableInMainMenu = true,
                 DisplayName = "Strm Assistant",
                 MenuIcon = "video_settings",
-                IsMainConfigPage = true,
+                // Emby's native tab host treats the controller's default view as the first tab.
+                // The upstream StrmAssistant tab implementation and Emby SDK demo both keep
+                // a tabbed main page out of the special single-page main-config route.
+                IsMainConfigPage = false,
             };
 
-            _tabs.Add(new NativeSettingsTabPageController(pluginInfo.Id, "StrmAssistantGeneral", "常规",
-                () => CreateGeneralView(pluginInfo.Id)));
+            // The default page returned by CreateDefaultPageView is the first visible tab (General).
+            // Only the remaining five pages belong in TabPageControllers.
             _tabs.Add(new NativeSettingsTabPageController(pluginInfo.Id, "StrmAssistantMediaInfo", "媒体信息",
                 () => CreateMediaView(pluginInfo.Id)));
             _tabs.Add(new NativeSettingsTabPageController(pluginInfo.Id, "StrmAssistantMetadata", "元数据",
@@ -55,6 +58,8 @@ namespace StrmAssistant.UI
         public override PluginPageInfo PageInfo { get; }
 
         public IReadOnlyList<IPluginUIPageController> TabPageControllers => _tabs.AsReadOnly();
+
+        public int VisibleTabCount => 1 + _tabs.Count;
 
         public override Task<IPluginUIView> CreateDefaultPageView()
         {
