@@ -1,5 +1,6 @@
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Plugins;
+using MediaBrowser.Model.Serialization;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -24,10 +25,12 @@ namespace StrmAssistant.UI
     public sealed class NativeSettingsUiEntryPoint : IServerEntryPoint
     {
         private readonly IPluginUIPagesRegistrar _registrar;
+        private readonly IJsonSerializer _jsonSerializer;
 
-        public NativeSettingsUiEntryPoint(IPluginUIPagesRegistrar registrar)
+        public NativeSettingsUiEntryPoint(IPluginUIPagesRegistrar registrar, IJsonSerializer jsonSerializer)
         {
             _registrar = registrar;
+            _jsonSerializer = jsonSerializer;
         }
 
         public void Run()
@@ -58,7 +61,7 @@ namespace StrmAssistant.UI
                     status.LegacyPagesHidden++;
                 }
 
-                var controller = new NativeSettingsMainController(plugin.GetPluginInfo(), plugin);
+                var controller = new NativeSettingsMainController(plugin.GetPluginInfo(), plugin, _jsonSerializer);
                 status.TabCount = controller.TabPageControllers.Count;
                 status.Registered = _registrar.RegisterPageController(plugin, controller);
                 if (!status.Registered)
