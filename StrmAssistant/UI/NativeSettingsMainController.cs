@@ -1,6 +1,7 @@
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Plugins.UI;
 using MediaBrowser.Model.Plugins.UI.Views;
+using MediaBrowser.Model.Serialization;
 using StrmAssistant.Options;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -20,12 +21,14 @@ namespace StrmAssistant.UI
     internal sealed class NativeSettingsMainController : NativeSettingsControllerBase, IHasTabbedUIPages
     {
         private readonly Plugin _plugin;
+        private readonly IJsonSerializer _jsonSerializer;
         private readonly List<IPluginUIPageController> _tabs = new List<IPluginUIPageController>();
 
-        public NativeSettingsMainController(PluginInfo pluginInfo, Plugin plugin)
+        public NativeSettingsMainController(PluginInfo pluginInfo, Plugin plugin, IJsonSerializer jsonSerializer)
             : base(pluginInfo.Id)
         {
             _plugin = plugin;
+            _jsonSerializer = jsonSerializer;
             PageInfo = new PluginPageInfo
             {
                 Name = "StrmAssistantNativeSettings",
@@ -60,38 +63,38 @@ namespace StrmAssistant.UI
 
         private IPluginUIView CreateGeneralView(string pluginId)
         {
-            return new NativeSettingsPageView<GeneralOptions>(pluginId, _plugin, NativeSettingsSections.General,
-                options => options.GeneralOptions);
+            return new NativeSettingsPageView<GeneralOptions>(pluginId, _plugin, _jsonSerializer,
+                NativeSettingsSections.General, options => options.GeneralOptions);
         }
 
         private IPluginUIView CreateMediaView(string pluginId)
         {
-            return new NativeSettingsPageView<MediaInfoExtractOptions>(pluginId, _plugin, NativeSettingsSections.Media,
-                options => options.MediaInfoExtractOptions);
+            return new NativeSettingsPageView<MediaInfoExtractOptions>(pluginId, _plugin, _jsonSerializer,
+                NativeSettingsSections.Media, options => options.MediaInfoExtractOptions);
         }
 
         private IPluginUIView CreateMetadataView(string pluginId)
         {
-            return new NativeSettingsPageView<MetadataEnhanceOptions>(pluginId, _plugin, NativeSettingsSections.Metadata,
-                options => options.MetadataEnhanceOptions);
+            return new NativeSettingsPageView<MetadataEnhanceOptions>(pluginId, _plugin, _jsonSerializer,
+                NativeSettingsSections.Metadata, options => options.MetadataEnhanceOptions);
         }
 
         private IPluginUIView CreateIntroView(string pluginId)
         {
-            return new NativeSettingsPageView<IntroSkipOptions>(pluginId, _plugin, NativeSettingsSections.Intro,
-                options => options.IntroSkipOptions);
+            return new NativeSettingsPageView<IntroSkipOptions>(pluginId, _plugin, _jsonSerializer,
+                NativeSettingsSections.Intro, options => options.IntroSkipOptions);
         }
 
         private IPluginUIView CreateExperienceView(string pluginId)
         {
-            return new NativeSettingsPageView<ExperienceEnhanceOptions>(pluginId, _plugin, NativeSettingsSections.Experience,
-                options => options.ExperienceEnhanceOptions);
+            return new NativeSettingsPageView<ExperienceEnhanceOptions>(pluginId, _plugin, _jsonSerializer,
+                NativeSettingsSections.Experience, options => options.ExperienceEnhanceOptions);
         }
 
         private IPluginUIView CreateAboutView(string pluginId)
         {
-            return new NativeSettingsPageView<AboutOptions>(pluginId, _plugin, NativeSettingsSections.About,
-                options => options.AboutOptions);
+            return new NativeSettingsPageView<AboutOptions>(pluginId, _plugin, _jsonSerializer,
+                NativeSettingsSections.About, options => options.AboutOptions);
         }
     }
 }
