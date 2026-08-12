@@ -13,6 +13,8 @@ internal static class NativeSettingsUiContractTests
         var tests = new (string Name, Action Body)[]
         {
             ("Native settings controller uses Emby IHasTabbedUIPages", UsesNativeTabbedInterface),
+            ("Plugin owns the IHasUIPages interface mapping", PluginOwnsUiPagesMapping),
+            ("Registrar injection entry point is retired", RegistrarEntryPointRetired),
             ("Native settings exposes one default plus five additional tabs", HasSixVisibleTabs),
             ("Native settings tab labels match requested categories", TabLabelsMatch),
             ("Native tab host is not forced through the single-page main-config route", IsNotMainConfigPage),
@@ -52,6 +54,20 @@ internal static class NativeSettingsUiContractTests
     {
         AssertTrue(typeof(IHasTabbedUIPages).IsAssignableFrom(typeof(NativeSettingsMainController)),
             "Controller does not implement Emby's native IHasTabbedUIPages contract.");
+    }
+
+    private static void PluginOwnsUiPagesMapping()
+    {
+        var map = typeof(StrmAssistant.Plugin).GetInterfaceMap(typeof(IHasUIPages));
+        AssertTrue(map.TargetMethods.Any(method => method.DeclaringType == typeof(StrmAssistant.Plugin)),
+            "IHasUIPages still resolves only to BasePluginSimpleUI instead of the derived Plugin implementation.");
+    }
+
+    private static void RegistrarEntryPointRetired()
+    {
+        var type = typeof(StrmAssistant.Plugin).Assembly.GetType("StrmAssistant.UI.NativeSettingsUiEntryPoint", false);
+        AssertTrue(type == null,
+            "Legacy registrar-based NativeSettingsUiEntryPoint is still present and can compete with direct plugin UI pages.");
     }
 
     private static void HasSixVisibleTabs()
