@@ -12,8 +12,10 @@ namespace StrmAssistant.UI
         public bool RegistrationAttempted { get; set; }
         public bool Registered { get; set; }
         public int TabCount { get; set; }
+        public int AdditionalTabCount { get; set; }
         public int LegacyPagesHidden { get; set; }
         public bool LegacyRollbackPerformed { get; set; }
+        public bool MainPageIsMainConfigPage { get; set; }
         public string Error { get; set; }
     }
 
@@ -45,14 +47,13 @@ namespace StrmAssistant.UI
                 if (plugin == null)
                     throw new InvalidOperationException("Plugin.Instance is not initialized.");
 
-                // Hide the generated BasePluginSimpleUI page before registering the native controller.
-                // Keep all old flags so a failed native registration can roll back without leaving the
-                // plugin with no accessible settings page.
+                // BasePluginSimpleUI still owns persistence, but its generated single-page UI must not
+                // compete with the native tab host in navigation.
                 var existing = _registrar.GetPluginUIPageRegistrations();
                 foreach (var registration in existing.Where(r => r.Plugin != null && r.Plugin.Id == plugin.Id))
                 {
                     var info = registration.PageInfo;
-                    if (info == null || string.Equals(info.Name, "StrmAssistantNativeSettings", StringComparison.Ordinal))
+                    if (info == null || string.Equals(info.Name, "StrmAssistantSettings", StringComparison.Ordinal))
                         continue;
 
                     hiddenPages.Add(Tuple.Create(info, info.EnableInMainMenu, info.IsMainConfigPage));
@@ -62,13 +63,17 @@ namespace StrmAssistant.UI
                 }
 
                 var controller = new NativeSettingsMainController(plugin.GetPluginInfo(), plugin, _jsonSerializer);
-                status.TabCount = controller.TabPageControllers.Count;
+                status.AdditionalTabCount = controller.TabPageControllers.Count;
+                status.TabCount = controller.VisibleTabCount;
+                status.MainPageIsMainConfigPage = controller.PageInfo.IsMainConfigPage;
                 status.Registered = _registrar.RegisterPageController(plugin, controller);
                 if (!status.Registered)
                     throw new InvalidOperationException("Emby IPluginUIPagesRegistrar rejected the native settings controller.");
 
-                plugin.Logger.Info("Native settings UI registration: Registered={0}, Tabs={1}, LegacyPagesHidden={2}",
-                    status.Registered, status.TabCount, status.LegacyPagesHidden);
+                plugin.Logger.Info(
+                    "Native settings UI registration: Registered={0}, VisibleTabs={1}, AdditionalTabs={2}, IsMainConfigPage={3}, LegacyPagesHidden={4}",
+                    status.Registered, status.TabCount, status.AdditionalTabCount,
+                    status.MainPageIsMainConfigPage, status.LegacyPagesHidden);
             }
             catch (Exception ex)
             {
