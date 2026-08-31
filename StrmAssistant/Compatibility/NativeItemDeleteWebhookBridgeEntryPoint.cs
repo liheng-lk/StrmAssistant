@@ -4,6 +4,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Services;
+using StrmAssistant.Common;
 using StrmAssistant.Experience;
 using System;
 using System.Collections.Generic;
