@@ -2,6 +2,7 @@ using MediaBrowser.Controller.Api;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Services;
 using StrmAssistant.Compatibility;
+using StrmAssistant.Experience;
 using System;
 
 namespace StrmAssistant.Api
@@ -31,17 +32,17 @@ namespace StrmAssistant.Api
         public object Get(GetNativeDeleteWebhookBridgeDiagnostics request)
         {
             var experience = Plugin.Instance?.GetPluginOptions()?.ExperienceEnhanceOptions;
-            var remote = Experience.RemoteDeepDeleteRuntimeSettings.GetSnapshot();
+            var remote = RemoteDeepDeleteRuntimeSettings.GetSnapshot();
             return new NativeDeleteWebhookBridgeDiagnosticsResponse
             {
                 GeneratedUtc = DateTimeOffset.UtcNow.ToString("O"),
                 DeepDeleteEnabled = experience?.EnableDeepDelete == true,
                 DeepDeleteDryRun = experience?.DeepDeleteDryRun == true,
                 DirectRemoteProviderEnabled = remote.Enabled &&
-                                              remote.Provider != Experience.RemoteDeepDeleteProviderType.None,
+                                              remote.Provider != RemoteDeepDeleteProviderType.None,
                 WebhookBridge = NativeItemDeleteWebhookBridgeState.Status,
                 DirectRemoteBridge = NativeItemDeleteRemoteBridgeState.Status,
-                Note = remote.Enabled && remote.Provider != Experience.RemoteDeepDeleteProviderType.None
+                Note = remote.Enabled && remote.Provider != RemoteDeepDeleteProviderType.None
                     ? "A direct OpenList/WebDAV provider is enabled, so the provider-agnostic webhook bridge intentionally stays idle to prevent duplicate destructive triggers."
                     : "With Deep Delete enabled, deleting an HTTP/HTTPS STRM through Emby's native DELETE /Items/{Id} should emit Event=deep.delete before the local STRM is removed."
             };
